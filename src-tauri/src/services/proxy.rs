@@ -16,14 +16,14 @@ use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
 use tauri::Emitter;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
 const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 /// 代理接管模式下需要从 Claude Live 配置中移除的"模型覆盖"字段。
 ///
-/// 原因：接管模式下 `*_MODEL` 必须由 CC Switch 写成稳定的 Claude 角色别名，
+/// 原因：接管模式下 `*_MODEL` 必须由 CC Gateway 写成稳定的 Claude 角色别名，
 /// 再由本地代理映射到当前供应商真实模型；`*_MODEL_NAME` 也需要同步接管，
 /// 否则 Claude Code 模型菜单会残留上一个供应商的显示名称。
 const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 12] = [
@@ -62,6 +62,8 @@ fn should_stop_shared_proxy(any_app_takeover_enabled: bool, agent_gateway_enable
 pub struct ProxyService {
     db: Arc<Database>,
     server: Arc<RwLock<Option<ProxyServer>>>,
+    claude_runtime: Arc<Mutex<crate::claude_runtime::RuntimeRegistry>>,
+    claude_lifecycle: Arc<Mutex<()>>,
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
@@ -77,6 +79,8 @@ impl ProxyService {
         Self {
             db,
             server: Arc::new(RwLock::new(None)),
+            claude_runtime: Arc::new(Mutex::new(crate::claude_runtime::RuntimeRegistry::default())),
+            claude_lifecycle: Arc::new(Mutex::new(())),
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
         }
@@ -134,6 +138,23 @@ impl ProxyService {
             auth_policy,
             takeover_model_fields,
         );
+    }
+
+    fn apply_claude_code_local_auth(&self, config: &mut Value) -> Result<(), String> {
+        let token = crate::claude_runtime::get_or_create_claude_code_token(self.db.as_ref())
+            .map_err(|error| format!("创建 Claude Code 本地 Gateway Key 失败: {error}"))?;
+        let root = config
+            .as_object_mut()
+            .ok_or_else(|| "Claude 配置根节点必须是对象".to_string())?;
+        let env = root.entry("env").or_insert_with(|| json!({}));
+        let env = env
+            .as_object_mut()
+            .ok_or_else(|| "Claude 配置 env 必须是对象".to_string())?;
+        for key in ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"] {
+            env.remove(key);
+        }
+        env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), json!(token));
+        Ok(())
     }
 
     fn apply_claude_takeover_fields_with_policy(
@@ -370,6 +391,7 @@ impl ProxyService {
             &proxy_url,
             &effective_provider,
         );
+        self.apply_claude_code_local_auth(&mut effective_settings)?;
         self.write_claude_live(&effective_settings)?;
         Ok(())
     }
@@ -427,6 +449,27 @@ impl ProxyService {
     }
 
     fn get_current_provider_for_app(&self, app_type: &AppType) -> Result<Option<Provider>, String> {
+        let canonical_consumer = match app_type {
+            AppType::Claude => {
+                Some(crate::agent_gateway::connection_profile::ClaudeProfileConsumer::ClaudeCode)
+            }
+            AppType::ClaudeDesktop => {
+                Some(crate::agent_gateway::connection_profile::ClaudeProfileConsumer::ClaudeDesktop)
+            }
+            _ => None,
+        };
+        if let Some(consumer) = canonical_consumer {
+            if let Some(provider) =
+                crate::agent_gateway::connection_profile::active_provider_projection(
+                    self.db.as_ref(),
+                    consumer,
+                )
+                .map_err(|error| format!("读取 canonical Claude Profile 失败: {error}"))?
+            {
+                return Ok(Some(provider));
+            }
+        }
+
         let Some(current_id) = crate::settings::get_effective_current_provider(&self.db, app_type)
             .map_err(|e| format!("获取 {app_type:?} 当前供应商失败: {e}"))?
         else {
@@ -609,6 +652,175 @@ impl ProxyService {
         Ok(info)
     }
 
+    /// Acquire the shared loopback listener for one Claude-facing consumer.
+    /// The consumer is committed only after bind and an identity-aware health
+    /// probe succeed; failures restore the previous in-memory runtime state.
+    pub async fn acquire_claude_consumer(
+        &self,
+        consumer: crate::claude_runtime::RuntimeConsumer,
+    ) -> Result<ProxyServerInfo, String> {
+        let _lifecycle_guard = self.claude_lifecycle.lock().await;
+        let was_running = self.is_running().await;
+        let global_config_before = self
+            .db
+            .get_global_proxy_config()
+            .await
+            .map_err(|error| format!("读取 CC Gateway 总开关失败: {error}"))?;
+        let checkpoint = self.claude_runtime.lock().await.begin_enable(consumer);
+
+        let attempt = async {
+            let config = self
+                .db
+                .get_proxy_config()
+                .await
+                .map_err(|error| format!("读取 CC Gateway listener 配置失败: {error}"))?;
+            if config.listen_address != crate::claude_runtime::DEFAULT_LISTEN_ADDRESS {
+                return Err(format!(
+                    "CC Gateway 仅允许监听 {}，当前为 {}",
+                    crate::claude_runtime::DEFAULT_LISTEN_ADDRESS,
+                    config.listen_address
+                ));
+            }
+
+            let info = self.start().await?;
+            crate::claude_runtime::probe_listener(
+                &info.address,
+                info.port,
+                std::time::Duration::from_secs(3),
+            )
+            .await
+            .map_err(|error| format!("CC Gateway listener 未就绪: {error}"))?;
+            Ok::<_, String>(info)
+        }
+        .await;
+
+        match attempt {
+            Ok(info) => {
+                self.claude_runtime.lock().await.mark_ready();
+                Ok(info)
+            }
+            Err(error) => {
+                let mut rollback_error = error;
+                if !was_running && self.is_running().await {
+                    if let Err(stop_error) = self.stop().await {
+                        rollback_error =
+                            format!("{rollback_error}; listener 回滚失败: {stop_error}");
+                    }
+                }
+                if !was_running && !global_config_before.proxy_enabled {
+                    if let Err(global_error) = self
+                        .db
+                        .update_global_proxy_config(global_config_before)
+                        .await
+                    {
+                        rollback_error =
+                            format!("{rollback_error}; 总开关回滚失败: {global_error}");
+                    }
+                }
+                self.claude_runtime
+                    .lock()
+                    .await
+                    .rollback_enable(checkpoint, rollback_error.clone());
+                Err(rollback_error)
+            }
+        }
+    }
+
+    /// Release one consumer, stopping the listener only when the registry is
+    /// empty. Returns whether a running listener was stopped.
+    pub async fn release_claude_consumer(
+        &self,
+        consumer: crate::claude_runtime::RuntimeConsumer,
+    ) -> Result<bool, String> {
+        let _lifecycle_guard = self.claude_lifecycle.lock().await;
+        let should_stop = self.claude_runtime.lock().await.begin_disable(consumer);
+        if !should_stop {
+            return Ok(false);
+        }
+
+        if self.is_running().await {
+            if let Err(error) = self.stop().await {
+                self.claude_runtime
+                    .lock()
+                    .await
+                    .mark_degraded(error.clone());
+                return Err(error);
+            }
+        }
+        self.claude_runtime.lock().await.mark_stopped();
+        Ok(true)
+    }
+
+    pub async fn claude_runtime_status(&self) -> crate::claude_runtime::RuntimeStatus {
+        self.claude_runtime.lock().await.status()
+    }
+
+    pub async fn set_claude_desktop_consumer_enabled(&self, enabled: bool) -> Result<(), String> {
+        let mut config = self
+            .db
+            .get_proxy_config_for_app("claude-desktop")
+            .await
+            .map_err(|error| format!("读取 Claude Desktop adapter 状态失败: {error}"))?;
+        let was_enabled = config.enabled;
+
+        if enabled {
+            let provider = crate::agent_gateway::connection_profile::active_provider_projection(
+                self.db.as_ref(),
+                crate::agent_gateway::connection_profile::ClaudeProfileConsumer::ClaudeDesktop,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "请先启用并保存 AnyRouter Claude Profile".to_string())?;
+
+            self.acquire_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeDesktop)
+                .await?;
+            if let Err(error) =
+                crate::claude_desktop_config::apply_provider(self.db.as_ref(), &provider)
+            {
+                if !was_enabled {
+                    let _ = self
+                        .release_claude_consumer(
+                            crate::claude_runtime::RuntimeConsumer::ClaudeDesktop,
+                        )
+                        .await;
+                }
+                return Err(error.to_string());
+            }
+
+            if !was_enabled {
+                config.enabled = true;
+                if let Err(error) = self.db.update_proxy_config_for_app(config).await {
+                    let _ = crate::claude_desktop_config::restore_official();
+                    let _ = self
+                        .release_claude_consumer(
+                            crate::claude_runtime::RuntimeConsumer::ClaudeDesktop,
+                        )
+                        .await;
+                    return Err(format!("保存 Claude Desktop adapter 状态失败: {error}"));
+                }
+            }
+        } else if was_enabled {
+            let provider = crate::agent_gateway::connection_profile::active_provider_projection(
+                self.db.as_ref(),
+                crate::agent_gateway::connection_profile::ClaudeProfileConsumer::ClaudeDesktop,
+            )
+            .map_err(|error| error.to_string())?;
+            crate::claude_desktop_config::restore_official().map_err(|error| error.to_string())?;
+
+            config.enabled = false;
+            if let Err(error) = self.db.update_proxy_config_for_app(config).await {
+                if let Some(provider) = provider.as_ref() {
+                    let _ =
+                        crate::claude_desktop_config::apply_provider(self.db.as_ref(), provider);
+                }
+                return Err(format!("保存 Claude Desktop adapter 状态失败: {error}"));
+            }
+            self.release_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeDesktop)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     async fn persist_ephemeral_listen_port_if_needed(
         &self,
         config: &ProxyConfig,
@@ -772,10 +984,20 @@ impl ProxyService {
 
         if enabled {
             // 1) 代理服务未运行则自动启动
-            if !self.is_running().await {
+            let release_claude_consumer_on_failure = matches!(app, AppType::Claude)
+                && !self
+                    .claude_runtime_status()
+                    .await
+                    .consumers
+                    .contains(&crate::claude_runtime::RuntimeConsumer::ClaudeCode);
+            if matches!(app, AppType::Claude) {
+                self.acquire_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeCode)
+                    .await?;
+            } else if !self.is_running().await {
                 self.start().await?;
             }
 
+            let activation_result: Result<(), String> = async {
             // 2) 已接管则直接返回（幂等）；但如果缺少备份或占位符残留，需要重建接管
             let current_config = self
                 .db
@@ -852,10 +1074,45 @@ impl ProxyService {
                 .await
                 .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
             updated_config.enabled = true;
-            self.db
+            if let Err(db_error) = self
+                .db
                 .update_proxy_config_for_app(updated_config)
                 .await
-                .map_err(|e| format!("设置 {app_type_str} enabled 状态失败: {e}"))?;
+            {
+                let activation_error = format!("设置 {app_type_str} enabled 状态失败: {db_error}");
+                let mut rollback_errors = Vec::new();
+
+                if let Err(restore_error) = self.restore_live_config_for_app_inner(&app).await {
+                    rollback_errors.push(format!("恢复 Live 配置失败: {restore_error}"));
+                } else if let Err(delete_error) = self.db.delete_live_backup(app_type_str).await {
+                    rollback_errors.push(format!("清理 Live 备份失败: {delete_error}"));
+                }
+
+                // A stale pre-existing `enabled=true` row may have led us into
+                // the rebuild path. Make a best-effort correction so the UI
+                // cannot report a route that no longer owns the live config.
+                if current_config.enabled {
+                    let mut disabled_config = current_config.clone();
+                    disabled_config.enabled = false;
+                    if let Err(disable_error) = self
+                        .db
+                        .update_proxy_config_for_app(disabled_config)
+                        .await
+                    {
+                        rollback_errors.push(format!(
+                            "清除 {app_type_str} 假启用状态失败: {disable_error}"
+                        ));
+                    }
+                }
+
+                if rollback_errors.is_empty() {
+                    return Err(activation_error);
+                }
+                return Err(format!(
+                    "{activation_error}; 回滚未完整完成: {}",
+                    rollback_errors.join("; ")
+                ));
+            }
 
             // 7) 兼容旧逻辑：写入 any-of 标志（失败不影响功能）
             let _ = self.db.set_live_takeover_active(true).await;
@@ -883,6 +1140,24 @@ impl ProxyService {
                         }
                     }
                 }
+            }
+
+                Ok(())
+            }
+            .await;
+
+            if let Err(error) = activation_result {
+                if release_claude_consumer_on_failure {
+                    if let Err(release_error) = self
+                        .release_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeCode)
+                        .await
+                    {
+                        return Err(format!(
+                            "{error}; Claude Code listener 回滚失败: {release_error}"
+                        ));
+                    }
+                }
+                return Err(error);
             }
 
             return Ok(());
@@ -931,6 +1206,11 @@ impl ProxyService {
             .await
             .map_err(|e| format!("清除 {app_type_str} 健康状态失败: {e}"))?;
 
+        if matches!(app, AppType::Claude) {
+            self.release_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeCode)
+                .await?;
+        }
+
         // 5) 若无其它接管，更新旧标志，并停止代理服务
         // 检查是否还有其它 app 的 enabled = true
         let any_enabled = self
@@ -939,7 +1219,7 @@ impl ProxyService {
             .await
             .map_err(|e| format!("检查接管状态失败: {e}"))?;
 
-        if !any_enabled {
+        if !any_enabled && !matches!(app, AppType::Claude) {
             let _ = self.db.set_live_takeover_active(false).await;
 
             if let Err(error) = self.stop_if_unused().await {
@@ -1602,6 +1882,7 @@ impl ProxyService {
                 &proxy_url,
                 &claude_provider,
             );
+            self.apply_claude_code_local_auth(&mut live_config)?;
             self.write_claude_live(&live_config)?;
             log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
         }
@@ -1661,6 +1942,7 @@ impl ProxyService {
                     &proxy_url,
                     &claude_provider,
                 );
+                self.apply_claude_code_local_auth(&mut live_config)?;
                 self.write_claude_live(&live_config)?;
                 log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
             }
@@ -3298,6 +3580,232 @@ mod tests {
                 .ensure_agent_gateway_listener_compatible(unsafe_address)
                 .is_err());
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn shared_claude_runtime_keeps_listener_until_all_consumers_release() {
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db);
+
+        service
+            .acquire_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeCode)
+            .await
+            .expect("start for Claude Code");
+        service
+            .acquire_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeDesktop)
+            .await
+            .expect("reuse for Claude Desktop");
+        assert!(service.is_running().await);
+
+        service
+            .release_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeCode)
+            .await
+            .expect("release Claude Code");
+        assert!(service.is_running().await);
+
+        service
+            .release_claude_consumer(crate::claude_runtime::RuntimeConsumer::ClaudeDesktop)
+            .await
+            .expect("release Claude Desktop");
+        assert!(!service.is_running().await);
+        assert_eq!(
+            service.claude_runtime_status().await.phase,
+            crate::claude_runtime::GatewayPhase::Disabled
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_claude_listener_bind_restores_the_global_proxy_switch() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve a loopback port");
+        let occupied_port = occupied.local_addr().expect("occupied address").port();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let mut global = db
+            .get_global_proxy_config()
+            .await
+            .expect("get global proxy config");
+        global.proxy_enabled = false;
+        global.listen_address = crate::claude_runtime::DEFAULT_LISTEN_ADDRESS.to_string();
+        global.listen_port = occupied_port;
+        db.update_global_proxy_config(global)
+            .await
+            .expect("configure the occupied port");
+
+        let service = ProxyService::new(db.clone());
+        service
+            .acquire_claude_consumer(crate::claude_runtime::RuntimeConsumer::Backend)
+            .await
+            .expect_err("an occupied port must reject activation");
+
+        assert!(
+            !db.get_global_proxy_config()
+                .await
+                .expect("get rolled back global proxy config")
+                .proxy_enabled,
+            "a failed listener activation must not leave a false enabled switch"
+        );
+        assert_eq!(
+            service.claude_runtime_status().await.phase,
+            crate::claude_runtime::GatewayPhase::Disabled
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_claude_code_config_takeover_releases_its_listener_consumer() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect_err("missing Claude live config must reject takeover");
+
+        assert!(!service.is_running().await);
+        assert_eq!(
+            service.claude_runtime_status().await.phase,
+            crate::claude_runtime::GatewayPhase::Disabled
+        );
+        assert!(
+            !db.get_proxy_config_for_app("claude")
+                .await
+                .expect("read Claude adapter state")
+                .enabled,
+            "a failed takeover must not persist an enabled adapter"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_claude_code_state_persist_restores_live_config_and_listener() {
+        let _home = TempHome::new();
+        let settings_path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(settings_path.parent().expect("Claude config parent"))
+            .expect("create Claude config directory");
+        let original = serde_json::json!({
+            "theme": "dark",
+            "env": { "USER_SETTING": "preserve-me" }
+        });
+        crate::config::write_json_file(&settings_path, &original)
+            .expect("write original Claude settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let defaults =
+            crate::agent_gateway::connection_profile::load_profile(db.as_ref()).expect("defaults");
+        crate::agent_gateway::connection_profile::update_profile(
+            db.as_ref(),
+            crate::agent_gateway::connection_profile::ClaudeConnectionProfileInput {
+                enabled: true,
+                base_url: defaults.base_url,
+                api_key: Some("test-upstream-key".to_string()),
+                models: defaults.models,
+            },
+        )
+        .expect("enable canonical profile");
+
+        {
+            let conn = db.conn.lock().expect("lock test database");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_claude_adapter_enable
+                 BEFORE UPDATE OF enabled ON proxy_config
+                 WHEN NEW.app_type = 'claude' AND NEW.enabled = 1
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected enabled-state failure');
+                 END;",
+            )
+            .expect("install enabled-state failure trigger");
+        }
+
+        let service = ProxyService::new(db.clone());
+        let error = service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect_err("injected database failure must reject activation");
+        assert!(
+            error.contains("enabled 状态失败"),
+            "unexpected activation error: {error}"
+        );
+
+        let restored: serde_json::Value =
+            crate::config::read_json_file(&settings_path).expect("read restored Claude settings");
+        assert_eq!(restored, original);
+        assert!(
+            db.get_live_backup("claude")
+                .await
+                .expect("read live backup")
+                .is_none(),
+            "successful rollback must remove the sensitive backup"
+        );
+        assert!(
+            !db.get_proxy_config_for_app("claude")
+                .await
+                .expect("read Claude adapter state")
+                .enabled
+        );
+        assert!(!service.is_running().await);
+        assert_eq!(
+            service.claude_runtime_status().await.phase,
+            crate::claude_runtime::GatewayPhase::Disabled
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_claude_desktop_config_write_rolls_back_listener_and_adapter_state() {
+        let home = TempHome::new();
+        let blocked_library = home
+            .dir
+            .path()
+            .join("Library")
+            .join("Application Support")
+            .join("Claude-3p")
+            .join("configLibrary");
+        std::fs::create_dir_all(blocked_library.parent().expect("config library parent"))
+            .expect("create Claude Desktop parent");
+        std::fs::write(&blocked_library, b"not a directory")
+            .expect("block Claude Desktop config library creation");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let defaults =
+            crate::agent_gateway::connection_profile::load_profile(db.as_ref()).expect("defaults");
+        crate::agent_gateway::connection_profile::update_profile(
+            db.as_ref(),
+            crate::agent_gateway::connection_profile::ClaudeConnectionProfileInput {
+                enabled: true,
+                base_url: defaults.base_url,
+                api_key: Some("test-upstream-key".to_string()),
+                models: defaults.models,
+            },
+        )
+        .expect("enable canonical profile");
+        let service = ProxyService::new(db.clone());
+
+        service
+            .set_claude_desktop_consumer_enabled(true)
+            .await
+            .expect_err("an unwritable Desktop profile must reject activation");
+
+        assert!(!service.is_running().await);
+        assert_eq!(
+            service.claude_runtime_status().await.phase,
+            crate::claude_runtime::GatewayPhase::Disabled
+        );
+        assert!(
+            !db.get_proxy_config_for_app("claude-desktop")
+                .await
+                .expect("read Desktop adapter state")
+                .enabled,
+            "a failed Desktop write must not persist an enabled adapter"
+        );
     }
 
     struct TempHome {
@@ -5536,18 +6044,24 @@ model = "gpt-5.1-codex"
             provider_b.settings_config.get("permissions"),
             "provider-derived live settings should be refreshed"
         );
-        assert_eq!(
+        let local_token = live
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
+            .and_then(|value| value.as_str())
+            .expect("Claude Code local gateway token");
+        assert!(local_token.starts_with("ccg-code-"));
+        assert_ne!(local_token, "b-key");
+        assert!(
             live.get("env")
                 .and_then(|env| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|v| v.as_str()),
-            Some(PROXY_TOKEN_PLACEHOLDER),
-            "takeover token placeholder should be preserved"
+                .is_none(),
+            "upstream API key must not be exposed to Claude Code"
         );
         assert_eq!(
             live.get("env")
                 .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
                 .and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:15721"),
+            Some("http://127.0.0.1:15722"),
             "takeover proxy URL should remain active"
         );
         assert!(
@@ -6130,7 +6644,7 @@ requires_openai_auth = true
                 .and_then(|v| v.get("aihubmix"))
                 .and_then(|v| v.get("base_url"))
                 .and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:15721/v1"),
+            Some("http://127.0.0.1:15722/v1"),
             "taken-over live config should stay pointed at the local proxy"
         );
 
@@ -6272,7 +6786,7 @@ requires_openai_auth = true
                 .and_then(|v| v.get("deepseek"))
                 .and_then(|v| v.get("base_url"))
                 .and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:15721/v1")
+            Some("http://127.0.0.1:15722/v1")
         );
         assert_eq!(
             parsed_live.get("model").and_then(|v| v.as_str()),

@@ -35,6 +35,26 @@ impl ProviderRouter {
     /// - 故障转移关闭时：仅返回当前供应商
     /// - 故障转移开启时：仅使用故障转移队列，按队列顺序依次尝试（P1 → P2 → ...）
     pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
+        let canonical_consumer = match app_type {
+            "claude" => {
+                Some(crate::agent_gateway::connection_profile::ClaudeProfileConsumer::ClaudeCode)
+            }
+            "claude-desktop" => {
+                Some(crate::agent_gateway::connection_profile::ClaudeProfileConsumer::ClaudeDesktop)
+            }
+            _ => None,
+        };
+        if let Some(consumer) = canonical_consumer {
+            if let Some(provider) =
+                crate::agent_gateway::connection_profile::active_provider_projection(
+                    self.db.as_ref(),
+                    consumer,
+                )?
+            {
+                return Ok(vec![provider]);
+            }
+        }
+
         let mut result = Vec::new();
         let mut total_providers = 0usize;
         let mut circuit_open_count = 0usize;
@@ -358,6 +378,41 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn canonical_claude_profile_routes_code_and_desktop_without_provider_copies() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let defaults = crate::agent_gateway::connection_profile::load_profile(&db).unwrap();
+        crate::agent_gateway::connection_profile::update_profile(
+            &db,
+            crate::agent_gateway::connection_profile::ClaudeConnectionProfileInput {
+                enabled: true,
+                base_url: defaults.base_url,
+                api_key: Some("sk-canonical-test-only".to_string()),
+                models: defaults.models,
+            },
+        )
+        .unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let code = router.select_providers("claude").await.unwrap();
+        let desktop = router.select_providers("claude-desktop").await.unwrap();
+
+        assert_eq!(code.len(), 1);
+        assert_eq!(desktop.len(), 1);
+        assert_eq!(
+            code[0].settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "sk-canonical-test-only"
+        );
+        assert_eq!(
+            desktop[0].settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "sk-canonical-test-only"
+        );
+        assert!(db.get_all_providers("claude").unwrap().is_empty());
+        assert!(db.get_all_providers("claude-desktop").unwrap().is_empty());
     }
 
     #[tokio::test]

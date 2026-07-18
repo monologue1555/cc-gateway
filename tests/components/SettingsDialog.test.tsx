@@ -93,48 +93,10 @@ const createSettingsMock = (overrides: Partial<SettingsMock> = {}) => {
   return { ...base, ...overrides };
 };
 
-interface ImportExportMock {
-  selectedFile: string;
-  status: string;
-  errorMessage: string | null;
-  backupId: string | null;
-  isImporting: boolean;
-  selectImportFile: ReturnType<typeof vi.fn>;
-  importConfig: ReturnType<typeof vi.fn>;
-  exportConfig: ReturnType<typeof vi.fn>;
-  clearSelection: ReturnType<typeof vi.fn>;
-  resetStatus: ReturnType<typeof vi.fn>;
-}
-
-const createImportExportMock = (overrides: Partial<ImportExportMock> = {}) => {
-  const base: ImportExportMock = {
-    selectedFile: "",
-    status: "idle",
-    errorMessage: null,
-    backupId: null,
-    isImporting: false,
-    selectImportFile: vi.fn(),
-    importConfig: vi.fn(),
-    exportConfig: vi.fn(),
-    clearSelection: vi.fn(),
-    resetStatus: vi.fn(),
-  };
-
-  return { ...base, ...overrides };
-};
-
 let settingsMock = createSettingsMock();
-let importExportMock = createImportExportMock();
-const useImportExportSpy = vi.fn();
-let lastUseImportExportOptions: Record<string, unknown> | undefined;
 
 vi.mock("@/hooks/useSettings", () => ({
   useSettings: () => settingsMock,
-}));
-
-vi.mock("@/hooks/useImportExport", () => ({
-  useImportExport: (options?: Record<string, unknown>) =>
-    useImportExportSpy(options),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -243,6 +205,14 @@ vi.mock("@/components/settings/WebdavSyncSection", () => ({
   ),
 }));
 
+vi.mock("@/components/settings/LegacyClaudeImportSection", () => ({
+  LegacyClaudeImportSection: ({ onImportSuccess }: any) => (
+    <button type="button" onClick={() => void onImportSuccess?.()}>
+      legacy-claude-import
+    </button>
+  ),
+}));
+
 let settingsApi: any;
 
 const renderSettingsPage = (
@@ -264,15 +234,6 @@ describe("SettingsPage Component", () => {
   beforeEach(async () => {
     tMock.mockImplementation((key: string) => key);
     settingsMock = createSettingsMock();
-    importExportMock = createImportExportMock();
-    useImportExportSpy.mockReset();
-    useImportExportSpy.mockImplementation(
-      (options?: Record<string, unknown>) => {
-        lastUseImportExportOptions = options;
-        return importExportMock;
-      },
-    );
-    lastUseImportExportOptions = undefined;
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
     settingsApi = (await import("@/lib/api")).settingsApi;
@@ -293,7 +254,7 @@ describe("SettingsPage Component", () => {
     expect(document.querySelector(".animate-spin")).toBeInTheDocument();
   });
 
-  it("should reset import/export status when dialog transitions to open", () => {
+  it("should render the Claude-only selective import when opened", () => {
     const client = new QueryClient({
       defaultOptions: {
         queries: { retry: false },
@@ -305,24 +266,20 @@ describe("SettingsPage Component", () => {
       </QueryClientProvider>,
     );
 
-    importExportMock.resetStatus.mockClear();
-
     rerender(
       <QueryClientProvider client={client}>
         <SettingsPage open={true} onOpenChange={vi.fn()} />
       </QueryClientProvider>,
     );
 
-    expect(importExportMock.resetStatus).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByText("settings.tabAdvanced"));
+    fireEvent.click(screen.getByText("settings.advanced.data.title"));
+    expect(screen.getByText("legacy-claude-import")).toBeInTheDocument();
+    expect(screen.queryByText("settings.exportConfig")).not.toBeInTheDocument();
   });
 
   it("should render general and advanced tabs and trigger child callbacks", () => {
     const onOpenChange = vi.fn();
-    // 设置 selectedFile 后，按钮显示 settings.import（可执行导入）
-    importExportMock = createImportExportMock({
-      selectedFile: "/tmp/config.json",
-    });
-
     renderSettingsPage({ onOpenChange });
 
     expect(screen.getByText("language:zh")).toBeInTheDocument();
@@ -342,19 +299,7 @@ describe("SettingsPage Component", () => {
     fireEvent.click(screen.getByText("settings.advanced.cloudSync.title"));
     expect(screen.getByText("webdav-sync-section:none")).toBeInTheDocument();
     fireEvent.click(screen.getByText("settings.advanced.data.title"));
-
-    // 有文件时，点击导入按钮执行 importConfig
-    fireEvent.click(screen.getByRole("button", { name: /settings\.import/ }));
-    expect(importExportMock.importConfig).toHaveBeenCalled();
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "settings.exportConfig" }),
-    );
-    expect(importExportMock.exportConfig).toHaveBeenCalled();
-
-    // 清除选择按钮
-    fireEvent.click(screen.getByRole("button", { name: "common.clear" }));
-    expect(importExportMock.clearSelection).toHaveBeenCalled();
+    expect(screen.getByText("legacy-claude-import")).toBeInTheDocument();
   });
 
   it("should reset tab content scroll position when switching settings tabs", () => {
@@ -371,25 +316,19 @@ describe("SettingsPage Component", () => {
     expect(scrollContainer!.scrollTop).toBe(0);
   });
 
-  it("should pass onImportSuccess callback to useImportExport hook", async () => {
+  it("should pass onImportSuccess callback to selective Claude import", async () => {
     const onImportSuccess = vi.fn();
 
     renderSettingsPage({ onImportSuccess });
+    fireEvent.click(screen.getByText("settings.tabAdvanced"));
+    fireEvent.click(screen.getByText("settings.advanced.data.title"));
+    fireEvent.click(screen.getByText("legacy-claude-import"));
 
-    expect(useImportExportSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ onImportSuccess }),
-    );
-    expect(lastUseImportExportOptions?.onImportSuccess).toBe(onImportSuccess);
-
-    if (typeof lastUseImportExportOptions?.onImportSuccess === "function") {
-      await lastUseImportExportOptions.onImportSuccess();
-    }
-    expect(onImportSuccess).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onImportSuccess).toHaveBeenCalledTimes(1));
   });
 
   it("should call saveSettings and close dialog when clicking save", async () => {
     const onOpenChange = vi.fn();
-    importExportMock = createImportExportMock();
 
     renderSettingsPage({ onOpenChange });
 
@@ -399,8 +338,6 @@ describe("SettingsPage Component", () => {
 
     await waitFor(() => {
       expect(settingsMock.saveSettings).toHaveBeenCalledTimes(1);
-      expect(importExportMock.clearSelection).toHaveBeenCalledTimes(1);
-      expect(importExportMock.resetStatus).toHaveBeenCalledTimes(2);
       expect(settingsMock.acknowledgeRestart).toHaveBeenCalledTimes(1);
       expect(onOpenChange).toHaveBeenCalledWith(false);
     });

@@ -53,7 +53,7 @@ function configFromState(
 ): AgentGatewayConfigInput {
   return {
     enabled: state.enabled,
-    emulateClaudeCode: state.emulateClaudeCode ?? false,
+    emulateClaudeCode: state.emulateClaudeCode ?? true,
     ...updates,
   };
 }
@@ -274,7 +274,7 @@ export function AgentGatewayPanel() {
             title={
               !state.enabled && !state.compatible
                 ? t("agentGateway.compatibility.enableBlocked", {
-                    defaultValue: "请先切换到 Anthropic Messages（原生）供应商",
+                    defaultValue: "请先保存并启用 canonical AnyRouter 连接",
                   })
                 : undefined
             }
@@ -315,10 +315,10 @@ export function AgentGatewayPanel() {
             <span className="font-medium">
               {state.compatible
                 ? t("agentGateway.compatibility.compatible", {
-                    defaultValue: "当前 Claude Desktop 路由兼容",
+                    defaultValue: "canonical AnyRouter 路由兼容",
                   })
                 : t("agentGateway.compatibility.incompatible", {
-                    defaultValue: "当前 Claude Desktop 路由不兼容",
+                    defaultValue: "canonical AnyRouter 路由尚不可用",
                   })}
             </span>
             <Badge variant="outline">Anthropic Messages · native</Badge>
@@ -327,12 +327,12 @@ export function AgentGatewayPanel() {
             {state.compatible
               ? t("agentGateway.compatibility.supported", {
                   defaultValue:
-                    "Agent Gateway 会直接复用这条原生 Anthropic 路由。",
+                    "Backend Gateway 会直接复用与 Claude Code、Claude Desktop 相同的原生 Anthropic 路由。",
                 })
               : state.compatibilityMessage ||
                 t("agentGateway.compatibility.unsupported", {
                   defaultValue:
-                    "MVP 仅支持 API 格式为 Anthropic Messages（原生）的 Claude Desktop 供应商。",
+                    "请先在主界面的 AnyRouter 与模型目录中保存有效 Key，并启用该连接。",
                 })}
           </p>
         </AlertDescription>
@@ -410,13 +410,13 @@ export function AgentGatewayPanel() {
         <div>
           <h4 className="text-sm font-semibold">
             {t("agentGateway.providers.title", {
-              defaultValue: "跟随 Claude Desktop 的 Anthropic 原生路由",
+              defaultValue: "canonical AnyRouter 上游",
             })}
           </h4>
           <p className="mt-1 text-xs text-muted-foreground">
             {t("agentGateway.providers.description", {
               defaultValue:
-                "Gateway 不维护第二套路由配置；MVP 仅跟随 Anthropic Messages（原生）供应商，不支持 Desktop 的 OpenAI 或 Gemini 格式。",
+                "Gateway 不维护第二份 Key 或模型映射；三种本地协议都读取同一 canonical Claude Profile。",
             })}
           </p>
         </div>
@@ -426,12 +426,12 @@ export function AgentGatewayPanel() {
             <div className="flex items-center justify-between gap-3">
               <p className="text-sm font-medium">
                 {t("agentGateway.providers.current", {
-                  defaultValue: "Claude Desktop 当前供应商",
+                  defaultValue: "当前上游连接",
                 })}
               </p>
               <Badge variant="secondary">
                 {t("agentGateway.providers.readOnly", {
-                  defaultValue: "自动跟随",
+                  defaultValue: "canonical",
                 })}
               </Badge>
             </div>
@@ -450,7 +450,7 @@ export function AgentGatewayPanel() {
               <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
                 {t("agentGateway.providers.empty", {
                   defaultValue:
-                    "Claude Desktop 当前没有可用的本地路由，请先在 Claude 页启用一个供应商。",
+                    "尚无可用连接，请先保存并启用主界面的 AnyRouter 配置。",
                 })}
               </p>
             )}
@@ -477,7 +477,7 @@ export function AgentGatewayPanel() {
               <p className="mt-2 text-xs text-muted-foreground">
                 {t("agentGateway.providers.failover", {
                   defaultValue:
-                    "由 Claude Desktop 路由统一决定，Agent Gateway 不单独修改。",
+                    "由 canonical 模型目录统一决定，Backend Gateway 不单独保存映射。",
                 })}
               </p>
             </div>
@@ -494,12 +494,12 @@ export function AgentGatewayPanel() {
             <p className="mt-1 text-xs text-muted-foreground">
               {t("agentGateway.providers.emulateClaudeCodeHint", {
                 defaultValue:
-                  "仅用于需要 Claude Code 客户端指纹的中转站；普通 Anthropic API 请保持关闭。",
+                  "AnyRouter 默认开启；仅连接标准 Anthropic API 时才需要关闭。",
               })}
             </p>
           </div>
           <Switch
-            checked={state.emulateClaudeCode ?? false}
+            checked={state.emulateClaudeCode ?? true}
             onCheckedChange={(emulateClaudeCode) =>
               update({ emulateClaudeCode })
             }
@@ -517,7 +517,7 @@ export function AgentGatewayPanel() {
             <p className="mt-1 text-xs text-muted-foreground">
               {t("agentGateway.models.description", {
                 defaultValue:
-                  "模型目录、别名与角色回落完全沿用 Claude Desktop 现有规则。",
+                  "模型目录、别名与角色回落来自同一 canonical Claude Profile。",
               })}
             </p>
           </div>

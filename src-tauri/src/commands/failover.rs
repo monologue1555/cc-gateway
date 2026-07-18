@@ -5,8 +5,16 @@
 use crate::database::FailoverQueueItem;
 use crate::provider::Provider;
 use crate::store::AppState;
-use std::str::FromStr;
 use tauri::Emitter;
+
+fn ensure_claude_code_failover_app(app_id: &str) -> Result<(), String> {
+    let app = crate::product_scope::parse_public_app_type(app_id)?;
+    if matches!(app, crate::app_config::AppType::Claude) {
+        Ok(())
+    } else {
+        Err("Claude Desktop uses its dedicated route and does not support Claude Code failover commands".to_string())
+    }
+}
 
 /// 获取故障转移队列
 #[tauri::command]
@@ -14,6 +22,7 @@ pub async fn get_failover_queue(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<Vec<FailoverQueueItem>, String> {
+    ensure_claude_code_failover_app(&app_type)?;
     state
         .db
         .get_failover_queue(&app_type)
@@ -26,6 +35,7 @@ pub async fn get_available_providers_for_failover(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<Vec<Provider>, String> {
+    ensure_claude_code_failover_app(&app_type)?;
     state
         .db
         .get_available_providers_for_failover(&app_type)
@@ -39,6 +49,7 @@ pub async fn add_to_failover_queue(
     app_type: String,
     provider_id: String,
 ) -> Result<(), String> {
+    ensure_claude_code_failover_app(&app_type)?;
     state
         .db
         .add_to_failover_queue(&app_type, &provider_id)
@@ -52,6 +63,7 @@ pub async fn remove_from_failover_queue(
     app_type: String,
     provider_id: String,
 ) -> Result<(), String> {
+    ensure_claude_code_failover_app(&app_type)?;
     state
         .db
         .remove_from_failover_queue(&app_type, &provider_id)
@@ -64,6 +76,7 @@ pub async fn get_auto_failover_enabled(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<bool, String> {
+    ensure_claude_code_failover_app(&app_type)?;
     state
         .db
         .get_proxy_config_for_app(&app_type)
@@ -82,6 +95,7 @@ pub async fn set_auto_failover_enabled(
     app_type: String,
     enabled: bool,
 ) -> Result<(), String> {
+    ensure_claude_code_failover_app(&app_type)?;
     log::info!(
         "[Failover] Setting auto_failover_enabled: app_type='{app_type}', enabled={enabled}"
     );
@@ -106,8 +120,7 @@ pub async fn set_auto_failover_enabled(
             .map_err(|e| e.to_string())?;
 
         if queue.is_empty() {
-            let app_enum = crate::app_config::AppType::from_str(&app_type)
-                .map_err(|_| format!("无效的应用类型: {app_type}"))?;
+            let app_enum = crate::product_scope::parse_public_app_type(&app_type)?;
 
             let current_id = crate::settings::get_effective_current_provider(&state.db, &app_enum)
                 .map_err(|e| e.to_string())?;

@@ -11,8 +11,8 @@ use crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID;
 use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider};
 
-pub const PROFILE_ID: &str = "00000000-0000-4000-8000-000000157210";
-pub const PROFILE_NAME: &str = "CC Switch";
+pub const PROFILE_ID: &str = "00000000-0000-4000-8000-000000157220";
+pub const PROFILE_NAME: &str = "CC Gateway";
 
 #[cfg(any(target_os = "macos", windows, test))]
 const CONFIG_FILE: &str = "claude_desktop_config.json";
@@ -128,6 +128,11 @@ struct InferenceModelSpec {
 pub fn apply_provider(db: &Database, provider: &Provider) -> Result<(), AppError> {
     let paths = current_platform_paths()?;
     apply_provider_to_paths(db, provider, &paths)
+}
+
+pub fn restore_official() -> Result<(), AppError> {
+    let paths = current_platform_paths()?;
+    restore_official_at_paths(&paths)
 }
 
 pub fn get_status(db: &Database, proxy_running: bool) -> Result<ClaudeDesktopStatus, AppError> {
@@ -283,7 +288,7 @@ pub fn get_or_create_gateway_token(db: &Database) -> Result<String, AppError> {
         }
     }
 
-    let token = format!("ccs-{}", uuid::Uuid::new_v4().simple());
+    let token = format!("ccg-desktop-{}", uuid::Uuid::new_v4().simple());
     db.set_setting(GATEWAY_TOKEN_SETTING_KEY, &token)?;
     Ok(token)
 }
@@ -1562,7 +1567,7 @@ mod tests {
         let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop")
+            json!("http://127.0.0.1:15722/claude-desktop")
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
         assert_eq!(profile["coworkEgressAllowedHosts"], json!(["*"]));
@@ -1570,7 +1575,7 @@ mod tests {
         assert!(profile["inferenceGatewayApiKey"]
             .as_str()
             .expect("gateway token")
-            .starts_with("ccs-"));
+            .starts_with("ccg-desktop-"));
         assert_eq!(
             profile["inferenceModels"],
             json!([{ "name": "claude-sonnet-4-6", "labelOverride": "Kimi K2", "supports1m": true }])
@@ -1595,7 +1600,7 @@ mod tests {
             let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
             assert_eq!(
                 profile["inferenceGatewayBaseUrl"],
-                json!("http://127.0.0.1:15721/claude-desktop")
+                json!("http://127.0.0.1:15722/claude-desktop")
             );
             assert_eq!(
                 profile["inferenceModels"],

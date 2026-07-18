@@ -28,8 +28,8 @@ interface UpdateContextValue {
 const UpdateContext = createContext<UpdateContextValue | undefined>(undefined);
 
 export function UpdateProvider({ children }: { children: React.ReactNode }) {
-  const DISMISSED_VERSION_KEY = "ccswitch:update:dismissedVersion";
-  const LEGACY_DISMISSED_KEY = "dismissedUpdateVersion"; // 兼容旧键
+  const DISMISSED_VERSION_KEY = "ccgateway:update:dismissedVersion";
+  const LEGACY_DISMISSED_KEY = "dismissedUpdateVersion";
 
   const [hasUpdate, setHasUpdate] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -114,16 +114,6 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(DISMISSED_VERSION_KEY);
     localStorage.removeItem(LEGACY_DISMISSED_KEY);
   }, []);
-
-  // 应用启动时自动检查更新
-  useEffect(() => {
-    // 延迟1秒后检查，避免影响启动体验
-    const timer = setTimeout(() => {
-      checkUpdate().catch(console.error);
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [checkUpdate]);
 
   const value: UpdateContextValue = {
     hasUpdate,

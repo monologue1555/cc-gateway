@@ -93,6 +93,18 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     sessions
 }
 
+/// Product-scoped session scan used by CC Gateway's public command surface.
+/// The broader scanner remains available for legacy data tooling only.
+pub fn scan_claude_sessions() -> Vec<SessionMeta> {
+    let mut sessions = claude::scan_sessions();
+    sessions.sort_by(|a, b| {
+        let a_ts = a.last_active_at.or(a.created_at).unwrap_or(0);
+        let b_ts = b.last_active_at.or(b.created_at).unwrap_or(0);
+        b_ts.cmp(&a_ts)
+    });
+    sessions
+}
+
 pub fn load_messages(provider_id: &str, source_path: &str) -> Result<Vec<SessionMessage>, String> {
     // SQLite sessions use a "sqlite:" prefixed source_path
     if provider_id == "opencode" && source_path.starts_with("sqlite:") {

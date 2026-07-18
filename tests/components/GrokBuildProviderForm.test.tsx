@@ -97,7 +97,9 @@ describe("GrokBuildProviderForm", () => {
     );
 
     await user.click(screen.getByRole("button", { name: /BytePlus/ }));
-    await user.type(screen.getByLabelText("API Key"), "secret-key");
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "secret-key" },
+    });
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);

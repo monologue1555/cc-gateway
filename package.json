@@ -1,7 +1,12 @@
 {
-  "name": "cc-switch",
-  "version": "3.17.0",
-  "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI",
+  "name": "cc-gateway",
+  "version": "0.1.0",
+  "description": "Claude Code, Claude Desktop, and local LLM gateway manager",
+  "packageManager": "pnpm@10.12.3",
+  "engines": {
+    "node": ">=20 <21",
+    "pnpm": "10.12.3"
+  },
   "type": "module",
   "scripts": {
     "dev": "pnpm tauri dev",
@@ -16,8 +21,15 @@
     "test:unit:watch": "vitest watch"
   },
   "keywords": [],
-  "author": "Jason Young",
+  "author": "monologue1555",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/monologue1555/cc-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/monologue1555/cc-gateway/issues"
+  },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.0",
     "@testing-library/jest-dom": "^6.6.3",
@@ -72,7 +84,6 @@
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@tauri-apps/plugin-process": "^2.0.0",
     "@tauri-apps/plugin-store": "^2.0.0",
-    "@tauri-apps/plugin-updater": "^2.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",

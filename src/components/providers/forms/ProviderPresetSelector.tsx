@@ -4,15 +4,7 @@ import { FormLabel } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ClaudeIcon, CodexIcon, GeminiIcon } from "@/components/BrandIcons";
-import {
-  ArrowUpAZ,
-  Search,
-  Zap,
-  Star,
-  Heart,
-  Layers,
-  Settings2,
-} from "lucide-react";
+import { ArrowUpAZ, Search, Zap, Layers, Settings2 } from "lucide-react";
 import type { ProviderPreset } from "@/config/claudeProviderPresets";
 import type { CodexProviderPreset } from "@/config/codexProviderPresets";
 import type { GeminiProviderPreset } from "@/config/geminiProviderPresets";
@@ -88,21 +80,14 @@ export function sortPresetEntries(
   t: PresetTranslator,
 ): PresetEntry[] {
   if (sortMode === PresetSortMode.Original) {
-    // 置顶优先级：官方分类 > 尊享合作伙伴（Kimi）> 其余原顺序。
-    // 用分区拼接而非排序，确保每组内部各自的相对顺序都不变；
-    // 排他条件保证「既是官方又是 prime」的预设只归入官方组、不被重复。
+    // 官方分类置顶，其余预设保持原始顺序。
     const official = entries.filter(
       (entry) => entry.preset.category === "official",
     );
-    const prime = entries.filter(
-      (entry) =>
-        entry.preset.category !== "official" && entry.preset.primePartner,
-    );
     const rest = entries.filter(
-      (entry) =>
-        entry.preset.category !== "official" && !entry.preset.primePartner,
+      (entry) => entry.preset.category !== "official",
     );
-    return [...official, ...prime, ...rest];
+    return [...official, ...rest];
   }
 
   return [...entries].sort((a, b) =>
@@ -401,8 +386,6 @@ export function ProviderPresetSelector({
 
         {visiblePresetEntries.map((entry) => {
           const isSelected = selectedPresetId === entry.id;
-          const isPartner = entry.preset.isPartner;
-          const isPrimePartner = entry.preset.primePartner;
           const presetCategory = entry.preset.category ?? "others";
           return (
             <button
@@ -420,19 +403,6 @@ export function ProviderPresetSelector({
               <span className="truncate">
                 {getPresetDisplayName(entry.preset, t)}
               </span>
-              {isPrimePartner ? (
-                <Heart
-                  className="absolute -top-1 -right-1 h-5 w-5 fill-amber-500 text-amber-500 drop-shadow-sm"
-                  strokeWidth={0}
-                  aria-hidden
-                />
-              ) : (
-                isPartner && (
-                  <span className="absolute -top-1 -right-1 flex items-center gap-0.5 rounded-full bg-gradient-to-r from-amber-500 to-yellow-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-md">
-                    <Star className="h-2.5 w-2.5 fill-current" />
-                  </span>
-                )
-              )}
             </button>
           );
         })}

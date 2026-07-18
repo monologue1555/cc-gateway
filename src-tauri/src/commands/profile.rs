@@ -7,6 +7,22 @@ use crate::database::Profile;
 use crate::services::profile::{ProfilePayload, ProfileScope, ProfileService};
 use crate::store::AppState;
 
+fn parse_public_profile_scope(scope: &str) -> Result<ProfileScope, String> {
+    let scope = ProfileScope::parse(scope).map_err(|error| error.to_string())?;
+    if scope
+        .apps()
+        .iter()
+        .all(crate::product_scope::is_supported_app_type)
+    {
+        Ok(scope)
+    } else {
+        Err(format!(
+            "Profile scope '{}' is unsupported by CC Gateway",
+            scope.as_str()
+        ))
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileDto {
@@ -104,10 +120,7 @@ pub fn list_profiles(state: State<'_, AppState>) -> Result<ProfilesResponse, Str
             .db
             .get_current_profile_id(ProfileScope::ClaudeDesktop.as_str())
             .map_err(|e| e.to_string())?,
-        codex: state
-            .db
-            .get_current_profile_id(ProfileScope::Codex.as_str())
-            .map_err(|e| e.to_string())?,
+        codex: None,
     };
     Ok(ProfilesResponse {
         profiles: profiles.into_iter().map(ProfileDto::from).collect(),
@@ -121,7 +134,7 @@ pub fn create_profile(
     name: String,
     scope: String,
 ) -> Result<ProfileDto, String> {
-    let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
+    let scope = parse_public_profile_scope(&scope)?;
     ProfileService::create(&state, &name, scope)
         .map(ProfileDto::from)
         .map_err(|e| e.to_string())
@@ -135,10 +148,7 @@ pub fn update_profile(
     resnapshot: Option<bool>,
     scope: Option<String>,
 ) -> Result<ProfileDto, String> {
-    let scope = scope
-        .map(|s| ProfileScope::parse(&s))
-        .transpose()
-        .map_err(|e| e.to_string())?;
+    let scope = scope.map(|s| parse_public_profile_scope(&s)).transpose()?;
     ProfileService::update(&state, &id, name, resnapshot.unwrap_or(false), scope)
         .map(ProfileDto::from)
         .map_err(|e| e.to_string())
@@ -151,7 +161,7 @@ pub fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), Stri
 
 #[tauri::command]
 pub fn clear_current_profile(state: State<'_, AppState>, scope: String) -> Result<(), String> {
-    let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
+    let scope = parse_public_profile_scope(&scope)?;
     state
         .db
         .set_current_profile_id(scope.as_str(), None)
@@ -169,7 +179,7 @@ pub fn apply_profile(
     id: String,
     scope: String,
 ) -> Result<Vec<String>, String> {
-    let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
+    let scope = parse_public_profile_scope(&scope)?;
     let (warnings, should_stop_proxy) =
         ProfileService::apply(&state, &id, scope).map_err(|e| e.to_string())?;
 

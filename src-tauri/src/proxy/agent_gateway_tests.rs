@@ -157,7 +157,8 @@ fn source_provider(upstream_origin: &str) -> Provider {
         json!({
             "env": {
                 "ANTHROPIC_AUTH_TOKEN": UPSTREAM_KEY,
-                "ANTHROPIC_BASE_URL": upstream_origin
+                "ANTHROPIC_BASE_URL": upstream_origin,
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": UPSTREAM_MODEL
             }
         }),
         None,
@@ -272,7 +273,7 @@ async fn agent_gateway_rejects_an_incompatible_desktop_route_before_upstream() {
         db,
         None,
     );
-    let proxy_info = proxy.start().await.expect("start CC Switch proxy");
+    let proxy_info = proxy.start().await.expect("start CC Gateway proxy");
     let base_url = format!("http://127.0.0.1:{}", proxy_info.port);
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -312,7 +313,7 @@ async fn agent_gateway_rejects_an_incompatible_desktop_route_before_upstream() {
     )
     .await;
 
-    proxy.stop().await.expect("stop CC Switch proxy");
+    proxy.stop().await.expect("stop CC Gateway proxy");
     upstream.stop().await;
 
     for (status, body) in [
@@ -342,6 +343,10 @@ async fn agent_gateway_serves_three_protocols_and_guards_access() {
         .expect("save Claude Desktop source provider");
     db.set_current_provider("claude-desktop", &provider.id)
         .expect("select Claude Desktop source provider");
+    db.save_provider("claude", &provider)
+        .expect("save Claude Code source provider");
+    db.set_current_provider("claude", &provider.id)
+        .expect("select Claude Code source provider");
 
     let gateway_config = agent_gateway::update_config(
         db.as_ref(),
@@ -365,7 +370,7 @@ async fn agent_gateway_serves_three_protocols_and_guards_access() {
         db.clone(),
         None,
     );
-    let proxy_info = proxy.start().await.expect("start CC Switch proxy");
+    let proxy_info = proxy.start().await.expect("start CC Gateway proxy");
     let base_url = format!("http://127.0.0.1:{}", proxy_info.port);
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -378,6 +383,17 @@ async fn agent_gateway_serves_three_protocols_and_guards_access() {
         "stream": false,
         "messages": [{ "role": "user", "content": "hello" }]
     });
+    let (code_status, code_body) = post_json(
+        &client,
+        &format!("{base_url}/v1/messages"),
+        (
+            "authorization",
+            "Bearer local-claude-gateway-key".to_string(),
+        ),
+        desktop_request.clone(),
+        false,
+    )
+    .await;
     let (desktop_status, desktop_body) = post_json(
         &client,
         &format!("{base_url}/claude-desktop/v1/messages"),
@@ -472,7 +488,8 @@ async fn agent_gateway_serves_three_protocols_and_guards_access() {
     )
     .await;
 
-    proxy.stop().await.expect("stop CC Switch proxy");
+    let diagnostics = proxy.diagnostic_snapshot();
+    proxy.stop().await.expect("stop CC Gateway proxy");
     upstream.stop().await;
     let captured = upstream.captured_requests();
 
@@ -505,16 +522,46 @@ async fn agent_gateway_serves_three_protocols_and_guards_access() {
     assert_eq!(chat_body["choices"][0]["message"]["role"], "assistant");
     assert_eq!(chat_body["choices"][0]["message"]["content"], "mock reply");
 
+    let completed_protocols = diagnostics
+        .iter()
+        .filter(|entry| entry.status == "success" && entry.end_reason == "completed")
+        .map(|entry| entry.protocol.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        completed_protocols,
+        vec!["anthropic", "anthropic", "anthropic", "responses", "chat",]
+    );
+    assert!(
+        diagnostics.iter().all(|entry| {
+            entry.provider == "Mock Anthropic"
+                && !entry.request_id.is_empty()
+                && !entry.requested_model.is_empty()
+                && !entry.upstream_model.is_empty()
+        }),
+        "{diagnostics:#?}"
+    );
+    assert!(diagnostics.iter().any(|entry| {
+        entry.requested_model == "claude-unknown"
+            && entry.status == "error"
+            && entry.end_reason == "forward_error"
+    }));
+    assert!(diagnostics
+        .iter()
+        .filter(|entry| matches!(entry.protocol.as_str(), "responses" | "chat"))
+        .all(|entry| entry.upstream_model == UPSTREAM_MODEL));
+
     assert_eq!(
         captured.len(),
-        4,
+        5,
         "auth/model validation failures must not reach upstream"
     );
+    assert_eq!(code_status, StatusCode::OK, "{code_body}");
+    assert_eq!(code_body["type"], "message");
     assert_eq!(
-        captured[0].body, captured[1].body,
+        captured[1].body, captured[2].body,
         "Agent Messages must converge on the same Anthropic request as the proven Desktop route"
     );
-    let desktop_beta = captured[0].anthropic_beta.clone();
+    let desktop_beta = captured[1].anthropic_beta.clone();
     assert!(desktop_beta
         .as_deref()
         .is_some_and(|value| value.contains("claude-code-20250219")));

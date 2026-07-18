@@ -7,6 +7,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::app_config::AppType;
 use crate::codex_config;
 use crate::config::{self, get_claude_settings_path, ConfigStatus};
+use crate::product_scope::parse_public_app_type;
 use crate::settings;
 use crate::store::AppState;
 
@@ -14,8 +15,6 @@ use crate::store::AppState;
 pub async fn get_claude_config_status() -> Result<ConfigStatus, String> {
     Ok(config::get_claude_config_status())
 }
-
-use std::str::FromStr;
 
 fn invalid_json_format_error(error: serde_json::Error) -> String {
     let lang = settings::get_settings()
@@ -67,7 +66,7 @@ pub async fn get_config_status(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<ConfigStatus, String> {
-    match AppType::from_str(&app).map_err(|e| e.to_string())? {
+    match parse_public_app_type(&app)? {
         AppType::Claude => Ok(config::get_claude_config_status()),
         AppType::ClaudeDesktop => {
             let status = crate::claude_desktop_config::get_status(
@@ -145,7 +144,7 @@ pub async fn get_claude_code_config_path() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_config_dir(app: String) -> Result<String, String> {
-    let dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
+    let dir = match parse_public_app_type(&app)? {
         AppType::Claude => config::get_claude_config_dir(),
         AppType::ClaudeDesktop => {
             crate::claude_desktop_config::get_config_library_path().map_err(|e| e.to_string())?
@@ -163,7 +162,7 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
-    let config_dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
+    let config_dir = match parse_public_app_type(&app)? {
         AppType::Claude => config::get_claude_config_dir(),
         AppType::ClaudeDesktop => {
             crate::claude_desktop_config::get_config_library_path().map_err(|e| e.to_string())?
@@ -280,6 +279,7 @@ pub async fn get_common_config_snippet(
     app_type: String,
     state: tauri::State<'_, crate::store::AppState>,
 ) -> Result<Option<String>, String> {
+    parse_public_app_type(&app_type)?;
     state
         .db
         .get_config_snippet(&app_type)
@@ -309,6 +309,7 @@ pub async fn set_common_config_snippet(
     snippet: String,
     state: tauri::State<'_, crate::store::AppState>,
 ) -> Result<(), String> {
+    let app = parse_public_app_type(&app_type)?;
     let is_cleared = snippet.trim().is_empty();
     let old_snippet = state
         .db
@@ -319,15 +320,14 @@ pub async fn set_common_config_snippet(
 
     let value = if is_cleared { None } else { Some(snippet) };
 
-    if matches!(app_type.as_str(), "claude" | "codex" | "gemini") {
+    if matches!(app, AppType::Claude | AppType::ClaudeDesktop) {
         if let Some(legacy_snippet) = old_snippet
             .as_deref()
             .filter(|value| !value.trim().is_empty())
         {
-            let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
             crate::services::provider::ProviderService::migrate_legacy_common_config_usage(
                 state.inner(),
-                app,
+                app.clone(),
                 legacy_snippet,
             )
             .map_err(|e| e.to_string())?;
@@ -343,8 +343,7 @@ pub async fn set_common_config_snippet(
         .set_config_snippet_cleared(&app_type, is_cleared)
         .map_err(|e| e.to_string())?;
 
-    if matches!(app_type.as_str(), "claude" | "codex" | "gemini") {
-        let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
+    if matches!(app, AppType::Claude | AppType::ClaudeDesktop) {
         crate::services::provider::ProviderService::sync_current_provider_for_app(
             state.inner(),
             app,
@@ -352,32 +351,6 @@ pub async fn set_common_config_snippet(
         .map_err(|e| e.to_string())?;
     }
 
-    if app_type == "omo"
-        && state
-            .db
-            .get_current_omo_provider("opencode", "omo")
-            .map_err(|e| e.to_string())?
-            .is_some()
-    {
-        crate::services::OmoService::write_config_to_file(
-            state.inner(),
-            &crate::services::omo::STANDARD,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    if app_type == "omo-slim"
-        && state
-            .db
-            .get_current_omo_provider("opencode", "omo-slim")
-            .map_err(|e| e.to_string())?
-            .is_some()
-    {
-        crate::services::OmoService::write_config_to_file(
-            state.inner(),
-            &crate::services::omo::SLIM,
-        )
-        .map_err(|e| e.to_string())?;
-    }
     Ok(())
 }
 
@@ -408,7 +381,7 @@ pub async fn extract_common_config_snippet(
     settingsConfig: Option<String>,
     state: tauri::State<'_, crate::store::AppState>,
 ) -> Result<String, String> {
-    let app = AppType::from_str(&appType).map_err(|e| e.to_string())?;
+    let app = parse_public_app_type(&appType)?;
 
     if let Some(settings_config) = settingsConfig.filter(|s| !s.trim().is_empty()) {
         let settings: serde_json::Value =

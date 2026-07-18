@@ -4,6 +4,9 @@
 //! the existing Claude Desktop proxy route. The gateway is only a thin facade
 //! over that route and therefore persists no provider or routing state.
 
+pub(crate) mod connection_profile;
+pub(crate) mod connection_profile_commands;
+
 use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
@@ -109,8 +112,12 @@ pub(crate) struct AgentGatewayConfig {
     pub enabled: bool,
     #[serde(default)]
     pub token: String,
-    #[serde(default)]
+    #[serde(default = "default_emulate_claude_code")]
     pub emulate_claude_code: bool,
+}
+
+const fn default_emulate_claude_code() -> bool {
+    true
 }
 
 impl Default for AgentGatewayConfig {
@@ -118,13 +125,13 @@ impl Default for AgentGatewayConfig {
         Self {
             enabled: false,
             token: String::new(),
-            emulate_claude_code: false,
+            emulate_claude_code: default_emulate_claude_code(),
         }
     }
 }
 
 fn generate_token() -> String {
-    format!("ccs-agent-{}", uuid::Uuid::new_v4().simple())
+    format!("ccg-agent-{}", uuid::Uuid::new_v4().simple())
 }
 
 pub(crate) fn mask_token(token: &str) -> String {
@@ -133,9 +140,9 @@ pub(crate) fn mask_token(token: &str) -> String {
         return "***".to_string();
     }
 
-    if let Some(secret) = token.strip_prefix("ccs-agent-") {
+    if let Some(secret) = token.strip_prefix("ccg-agent-") {
         let suffix_start = secret.len().saturating_sub(4);
-        return format!("ccs-agent-••••••••{}", &secret[suffix_start..]);
+        return format!("ccg-agent-••••••••{}", &secret[suffix_start..]);
     }
 
     format!("{}...{}", &token[..4], &token[token.len() - 4..])
@@ -177,9 +184,15 @@ pub(crate) fn load_agent_gateway_config(db: &Database) -> Result<AgentGatewayCon
     Ok(config)
 }
 
-/// Read the effective Claude Desktop provider selected by CC Switch. This is a
+/// Read the effective Claude Desktop provider selected by CC Gateway. This is a
 /// view of the existing route, not a second selection mechanism.
 pub(crate) fn desktop_current_provider(db: &Database) -> Result<Option<Provider>, AppError> {
+    if let Some(provider) = connection_profile::active_provider_projection(
+        db,
+        connection_profile::ClaudeProfileConsumer::ClaudeDesktop,
+    )? {
+        return Ok(Some(provider));
+    }
     let Some(provider_id) =
         crate::settings::get_effective_current_provider(db, &AppType::ClaudeDesktop)?
     else {
@@ -209,6 +222,12 @@ fn desktop_route_providers(
     db: &Database,
     auto_failover_enabled: bool,
 ) -> Result<Vec<Provider>, AppError> {
+    if let Some(provider) = connection_profile::active_provider_projection(
+        db,
+        connection_profile::ClaudeProfileConsumer::ClaudeDesktop,
+    )? {
+        return Ok(vec![provider]);
+    }
     if !auto_failover_enabled {
         return Ok(desktop_current_provider(db)?.into_iter().collect());
     }
@@ -405,10 +424,10 @@ mod tests {
 
     #[test]
     fn masks_local_gateway_token_without_exposing_the_secret() {
-        let token = "ccs-agent-1234567890abcdef";
+        let token = "ccg-agent-1234567890abcdef";
         let masked = mask_token(token);
 
-        assert_eq!(masked, "ccs-agent-••••••••cdef");
+        assert_eq!(masked, "ccg-agent-••••••••cdef");
         assert!(!masked.contains("1234567890ab"));
     }
 
@@ -435,7 +454,7 @@ mod tests {
         .expect("legacy config should remain readable");
 
         assert!(parsed.enabled);
-        assert!(!parsed.emulate_claude_code);
+        assert!(parsed.emulate_claude_code);
         assert!(parsed.token.is_empty());
     }
 
@@ -533,7 +552,7 @@ mod tests {
             .expect("select provider");
         db.set_setting(
             AGENT_GATEWAY_CONFIG_KEY,
-            r#"{"enabled":false,"token":"ccs-agent-existing","providerIds":["p1"],"currentProviderId":"p1","autoFailoverEnabled":true}"#,
+            r#"{"enabled":false,"token":"ccg-agent-existing","providerIds":["p1"],"currentProviderId":"p1","autoFailoverEnabled":true}"#,
         )
         .expect("seed legacy config");
 
@@ -546,7 +565,7 @@ mod tests {
         )
         .expect("save gateway config");
 
-        assert_eq!(config.token, "ccs-agent-existing");
+        assert_eq!(config.token, "ccg-agent-existing");
         let raw = db
             .get_setting(AGENT_GATEWAY_CONFIG_KEY)
             .expect("read config")
@@ -555,7 +574,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&raw).expect("valid json"),
             json!({
                 "enabled": true,
-                "token": "ccs-agent-existing",
+                "token": "ccg-agent-existing",
                 "emulateClaudeCode": true
             })
         );
@@ -602,12 +621,12 @@ mod tests {
     #[test]
     fn token_match_is_exact() {
         let config = AgentGatewayConfig {
-            token: "ccs-agent-secret".to_string(),
+            token: "ccg-agent-secret".to_string(),
             ..AgentGatewayConfig::default()
         };
 
-        assert!(token_matches(&config, "ccs-agent-secret"));
-        assert!(!token_matches(&config, "ccs-agent-secrex"));
-        assert!(!token_matches(&config, "ccs-agent-secret-extra"));
+        assert!(token_matches(&config, "ccg-agent-secret"));
+        assert!(!token_matches(&config, "ccg-agent-secrex"));
+        assert!(!token_matches(&config, "ccg-agent-secret-extra"));
     }
 }

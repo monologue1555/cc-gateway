@@ -6,6 +6,7 @@ use crate::services::env_manager::{
 /// Check environment variable conflicts for a specific app
 #[tauri::command]
 pub fn check_env_conflicts(app: String) -> Result<Vec<EnvConflict>, String> {
+    crate::product_scope::parse_public_app_type(&app)?;
     check_conflicts(&app)
 }
 

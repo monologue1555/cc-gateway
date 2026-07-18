@@ -12,7 +12,6 @@ use crate::services::skill::{
     SkillsShSearchResult,
 };
 use crate::store::AppState;
-use std::str::FromStr;
 use std::sync::Arc;
 use tauri::State;
 
@@ -21,7 +20,7 @@ pub struct SkillServiceState(pub Arc<SkillService>);
 
 /// 解析 app 参数为 AppType
 fn parse_app_type(app: &str) -> Result<AppType, String> {
-    AppType::from_str(app).map_err(|e| e.to_string())
+    crate::product_scope::parse_public_app_type(app)
 }
 
 // ========== 统一管理命令 ==========
@@ -108,9 +107,16 @@ pub fn scan_unmanaged_skills(
 /// 从应用目录导入 Skills
 #[tauri::command]
 pub fn import_skills_from_apps(
-    imports: Vec<ImportSkillSelection>,
+    mut imports: Vec<ImportSkillSelection>,
     app_state: State<'_, AppState>,
 ) -> Result<Vec<InstalledSkill>, String> {
+    for selection in &mut imports {
+        selection.apps.codex = false;
+        selection.apps.gemini = false;
+        selection.apps.grokbuild = false;
+        selection.apps.opencode = false;
+        selection.apps.hermes = false;
+    }
     SkillService::import_from_apps(&app_state.db, imports).map_err(|e| e.to_string())
 }
 

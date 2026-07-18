@@ -3,9 +3,19 @@
 //! 提供前端调用的 API 接口
 
 use crate::error::AppError;
+use crate::product_scope::parse_public_app_type;
 use crate::proxy::types::*;
 use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
+
+fn ensure_claude_code_proxy_app(app_id: &str) -> Result<crate::app_config::AppType, String> {
+    let app = parse_public_app_type(app_id)?;
+    if matches!(app, crate::app_config::AppType::Claude) {
+        Ok(app)
+    } else {
+        Err("Claude Desktop uses its dedicated route and does not support Claude Code takeover commands".to_string())
+    }
+}
 
 fn ensure_agent_gateway_listener_compatible(
     state: &AppState,
@@ -21,7 +31,6 @@ fn ensure_agent_gateway_listener_compatible(
     }
     Ok(())
 }
-use std::str::FromStr;
 
 /// 启动代理服务器（仅启动服务，不接管 Live 配置）
 #[tauri::command]
@@ -71,7 +80,11 @@ pub async fn stop_proxy_with_restore(state: tauri::State<'_, AppState>) -> Resul
 pub async fn get_proxy_takeover_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<ProxyTakeoverStatus, String> {
-    state.proxy_service.get_takeover_status().await
+    let status = state.proxy_service.get_takeover_status().await?;
+    Ok(ProxyTakeoverStatus {
+        claude: status.claude,
+        ..Default::default()
+    })
 }
 
 /// 为指定应用开启/关闭接管
@@ -81,6 +94,7 @@ pub async fn set_proxy_takeover_for_app(
     app_type: String,
     enabled: bool,
 ) -> Result<(), String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     state
         .proxy_service
         .set_takeover_for_app(&app_type, enabled)
@@ -91,6 +105,12 @@ pub async fn set_proxy_takeover_for_app(
 #[tauri::command]
 pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<ProxyStatus, String> {
     state.proxy_service.get_status().await
+}
+
+/// 获取最近 50 条 CC Gateway 脱敏诊断。
+#[tauri::command]
+pub fn get_gateway_diagnostics() -> Vec<crate::proxy::diagnostics::GatewayDiagnosticEntry> {
+    crate::proxy::diagnostics::recent_gateway_diagnostics()
 }
 
 /// 获取代理配置
@@ -147,6 +167,7 @@ pub async fn get_proxy_config_for_app(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<AppProxyConfig, String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     let db = &state.db;
     db.get_proxy_config_for_app(&app_type)
         .await
@@ -163,6 +184,7 @@ pub async fn update_proxy_config_for_app(
 ) -> Result<(), String> {
     let db = &state.db;
     let app_type = config.app_type.clone();
+    ensure_claude_code_proxy_app(&app_type)?;
     let circuit_config = CircuitBreakerConfig::from(&config);
 
     db.update_proxy_config_for_app(config)
@@ -197,6 +219,7 @@ pub async fn get_default_cost_multiplier(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<String, String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     get_default_cost_multiplier_internal(&state, &app_type)
         .await
         .map_err(|e| e.to_string())
@@ -227,6 +250,7 @@ pub async fn set_default_cost_multiplier(
     app_type: String,
     value: String,
 ) -> Result<(), String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     set_default_cost_multiplier_internal(&state, &app_type, &value)
         .await
         .map_err(|e| e.to_string())
@@ -254,6 +278,7 @@ pub async fn get_pricing_model_source(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<String, String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     get_pricing_model_source_internal(&state, &app_type)
         .await
         .map_err(|e| e.to_string())
@@ -284,6 +309,7 @@ pub async fn set_pricing_model_source(
     app_type: String,
     value: String,
 ) -> Result<(), String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     set_pricing_model_source_internal(&state, &app_type, &value)
         .await
         .map_err(|e| e.to_string())
@@ -310,13 +336,12 @@ pub async fn switch_proxy_provider(
 ) -> Result<(), String> {
     // Codex's built-in official provider can use the client's native OpenAI
     // login through takeover. Other official providers remain blocked.
+    let app = ensure_claude_code_proxy_app(&app_type)?;
     let provider = state
         .db
         .get_provider_by_id(&provider_id, &app_type)
         .map_err(|e| format!("读取供应商失败: {e}"))?
         .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
-    let app = crate::app_config::AppType::from_str(&app_type)
-        .map_err(|e| format!("无效的应用类型: {e}"))?;
     if provider.category.as_deref() == Some("official")
         && !crate::services::provider::official_provider_supports_proxy_takeover(&app, &provider)
     {
@@ -341,6 +366,7 @@ pub async fn get_provider_health(
     provider_id: String,
     app_type: String,
 ) -> Result<ProviderHealth, String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     let db = &state.db;
     db.get_provider_health(&provider_id, &app_type)
         .await
@@ -359,6 +385,7 @@ pub async fn reset_circuit_breaker(
     provider_id: String,
     app_type: String,
 ) -> Result<(), String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     // 1. 重置数据库健康状态
     let db = &state.db;
     db.update_provider_health(&provider_id, &app_type, true, None)
@@ -475,6 +502,7 @@ pub async fn get_circuit_breaker_stats(
     provider_id: String,
     app_type: String,
 ) -> Result<Option<CircuitBreakerStats>, String> {
+    ensure_claude_code_proxy_app(&app_type)?;
     // 这个功能需要访问运行中的代理服务器的内存状态
     // 目前先返回 None，后续可以通过 ProxyService 暴露接口来实现
     let _ = (state, provider_id, app_type);

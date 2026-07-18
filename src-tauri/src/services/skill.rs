@@ -789,7 +789,10 @@ impl SkillService {
             Self::create_uninstall_backup(&skill)?.map(|path| path.to_string_lossy().to_string());
 
         // 从所有应用目录删除
-        for app in AppType::all() {
+        for app in crate::product_scope::supported_app_types()
+            .into_iter()
+            .filter(|app| matches!(app, AppType::Claude))
+        {
             let _ = Self::remove_from_app(&skill.directory, &app);
         }
 
@@ -1205,10 +1208,8 @@ impl SkillService {
         // 3. 文件移动完成后才持久化设置
         crate::settings::set_skill_storage_location(target)?;
 
-        // 4. 刷新所有应用目录的 symlink（指向新 SSOT）
-        for app in AppType::all() {
-            let _ = Self::sync_to_app(db, &app);
-        }
+        // 4. 只刷新 CC Gateway 管理的 Claude Code 目录。
+        let _ = Self::sync_to_app(db, &AppType::Claude);
 
         log::info!(
             "Skill 存储迁移完成: {} 迁移, {} 跳过, {} 错误",
@@ -1381,9 +1382,9 @@ impl SkillService {
             .map(|s| s.directory.clone())
             .collect();
 
-        // 收集所有待扫描的目录及其来源标签
+        // CC Gateway 只扫描 Claude Code 与自身的 Skill 目录。
         let mut scan_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in AppType::all() {
+        for app in [AppType::Claude] {
             if let Ok(d) = Self::get_app_skills_dir(&app) {
                 scan_sources.push((d, app.as_str().to_string()));
             }
@@ -1452,9 +1453,9 @@ impl SkillService {
             imports.iter().map(|selection| selection.directory.as_str()),
         );
 
-        // 收集所有候选搜索目录
+        // 只从 Claude Code 与 CC Gateway 自身目录收集候选。
         let mut search_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in AppType::all() {
+        for app in [AppType::Claude] {
             if let Ok(d) = Self::get_app_skills_dir(&app) {
                 search_sources.push((d, app.as_str().to_string()));
             }
@@ -2335,7 +2336,7 @@ impl SkillService {
             return Ok(Some(ssot_path));
         }
 
-        for app in AppType::all() {
+        for app in [AppType::Claude] {
             let app_dir = match Self::get_app_skills_dir(&app) {
                 Ok(dir) => dir,
                 Err(_) => continue,

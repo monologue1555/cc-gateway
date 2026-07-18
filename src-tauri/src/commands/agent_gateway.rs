@@ -9,6 +9,40 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 use tauri::State;
 
+#[tauri::command]
+pub fn get_claude_connection_profile(
+    state: State<'_, AppState>,
+) -> Result<crate::agent_gateway::connection_profile::ClaudeConnectionProfileState, String> {
+    crate::agent_gateway::connection_profile_commands::get_claude_connection_profile(state)
+}
+
+#[tauri::command]
+pub fn update_claude_connection_profile(
+    state: State<'_, AppState>,
+    input: crate::agent_gateway::connection_profile::ClaudeConnectionProfileInput,
+) -> Result<crate::agent_gateway::connection_profile::ClaudeConnectionProfileState, String> {
+    crate::agent_gateway::connection_profile_commands::update_claude_connection_profile(
+        state, input,
+    )
+}
+
+#[tauri::command]
+pub async fn test_claude_connection_model(
+    state: State<'_, AppState>,
+    input: crate::agent_gateway::connection_profile_commands::ClaudeConnectionTestInput,
+) -> Result<crate::agent_gateway::connection_profile::ClaudeModelTestResult, String> {
+    crate::agent_gateway::connection_profile_commands::test_claude_connection_model(state, input)
+        .await
+}
+
+#[tauri::command]
+pub async fn test_all_claude_connection_models(
+    state: State<'_, AppState>,
+) -> Result<crate::agent_gateway::connection_profile::ClaudeConnectionTestSummary, String> {
+    crate::agent_gateway::connection_profile_commands::test_all_claude_connection_models(state)
+        .await
+}
+
 async fn resolved_listen_port(state: &AppState) -> Result<u16, String> {
     let status = state.proxy_service.get_status().await?;
     if status.running && status.port != 0 {
@@ -30,7 +64,7 @@ async fn ensure_loopback_listener(state: &AppState) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Agent Gateway 仅允许 localhost；当前共享代理监听 {address}。请先在 CC Switch 中把监听地址改为 127.0.0.1。"
+            "Agent Gateway 仅允许 localhost；当前共享代理监听 {address}。请先在 CC Gateway 中把监听地址改为 127.0.0.1。"
         ))
     }
 }
@@ -48,16 +82,44 @@ pub async fn update_agent_gateway_config(
     state: State<'_, AppState>,
     input: AgentGatewayConfigInput,
 ) -> Result<AgentGatewayState, String> {
+    let previous = agent_gateway::load_agent_gateway_config(state.db.as_ref())
+        .map_err(|error| error.to_string())?;
     if input.enabled {
         ensure_loopback_listener(&state).await?;
-    }
-    let config = agent_gateway::update_config(state.db.as_ref(), input)
-        .map_err(|error| error.to_string())?;
-    if config.enabled {
-        state.proxy_service.start().await?;
+        if !previous.enabled {
+            state
+                .proxy_service
+                .acquire_claude_consumer(crate::claude_runtime::RuntimeConsumer::Backend)
+                .await?;
+        }
+        if let Err(error) = agent_gateway::update_config(state.db.as_ref(), input) {
+            if !previous.enabled {
+                let _ = state
+                    .proxy_service
+                    .release_claude_consumer(crate::claude_runtime::RuntimeConsumer::Backend)
+                    .await;
+            }
+            return Err(error.to_string());
+        }
+    } else {
+        agent_gateway::update_config(state.db.as_ref(), input)
+            .map_err(|error| error.to_string())?;
+        if previous.enabled {
+            state
+                .proxy_service
+                .release_claude_consumer(crate::claude_runtime::RuntimeConsumer::Backend)
+                .await?;
+        }
     }
     let listen_port = resolved_listen_port(&state).await?;
     agent_gateway::build_state(state.db.as_ref(), listen_port).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_claude_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<crate::claude_runtime::RuntimeStatus, String> {
+    Ok(state.proxy_service.claude_runtime_status().await)
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-use cc_switch_lib::{
+use cc_gateway_lib::{
     get_codex_auth_path, get_codex_config_path, import_default_config_test_hook, read_json_file,
     switch_provider_test_hook, write_codex_live_atomic, AppError, AppType, McpApps, McpServer,
     MultiAppConfig, Provider, ProviderService,
@@ -16,7 +16,7 @@ use support::{
 };
 
 fn settings_path(home: &Path) -> PathBuf {
-    home.join(".cc-switch").join("settings.json")
+    home.join(".cc-gateway").join("settings.json")
 }
 
 fn grokbuild_config(name: &str, endpoint: &str, api_key: &str) -> String {
@@ -490,9 +490,9 @@ fn switch_provider_missing_provider_returns_error() {
 fn switch_provider_updates_claude_live_and_state() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
 
-    let settings_path = cc_switch_lib::get_claude_settings_path();
+    let settings_path = cc_gateway_lib::get_claude_settings_path();
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).expect("create claude settings dir");
     }
@@ -595,13 +595,10 @@ fn switch_provider_updates_claude_live_and_state() {
 
     // v3.7.0+ 使用 SQLite 数据库而非 config.json
     // 验证数据已持久化到数据库
-    let home_dir = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
-    let db_path = std::path::Path::new(&home_dir)
-        .join(".cc-switch")
-        .join("cc-switch.db");
+    let db_path = home.join(".cc-gateway").join("cc-gateway.db");
     assert!(
         db_path.exists(),
-        "switching provider should persist to cc-switch.db"
+        "switching provider should persist to cc-gateway.db"
     );
 
     // 验证当前供应商已更新

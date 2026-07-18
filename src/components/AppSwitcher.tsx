@@ -18,17 +18,8 @@ interface AppSwitcherProps {
   compact?: boolean;
 }
 
-const ALL_APPS: AppId[] = [
-  "claude",
-  "claude-desktop",
-  "codex",
-  "gemini",
-  "grokbuild",
-  "opencode",
-  "openclaw",
-  "hermes",
-];
-const STORAGE_KEY = "cc-switch-last-app";
+const ALL_APPS: AppId[] = ["claude", "claude-desktop"];
+const STORAGE_KEY = "cc-gateway-last-app";
 
 export function AppSwitcher({
   activeApp,

@@ -7,6 +7,13 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use tauri::State;
 
+fn ensure_usage_app(app_type: Option<&str>) -> Result<(), AppError> {
+    if let Some(app_type) = app_type {
+        crate::product_scope::parse_public_app_type(app_type).map_err(AppError::InvalidInput)?;
+    }
+    Ok(())
+}
+
 /// 获取使用量汇总
 #[tauri::command]
 pub fn get_usage_summary(
@@ -17,6 +24,7 @@ pub fn get_usage_summary(
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<UsageSummary, AppError> {
+    ensure_usage_app(app_type.as_deref())?;
     state.db.get_usage_summary(
         start_date,
         end_date,
@@ -53,6 +61,7 @@ pub fn get_usage_trends(
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<DailyStats>, AppError> {
+    ensure_usage_app(app_type.as_deref())?;
     state.db.get_daily_trends(
         start_date,
         end_date,
@@ -72,6 +81,7 @@ pub fn get_provider_stats(
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<ProviderStats>, AppError> {
+    ensure_usage_app(app_type.as_deref())?;
     state.db.get_provider_stats(
         start_date,
         end_date,
@@ -91,6 +101,7 @@ pub fn get_model_stats(
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<ModelStats>, AppError> {
+    ensure_usage_app(app_type.as_deref())?;
     state.db.get_model_stats(
         start_date,
         end_date,
@@ -108,6 +119,7 @@ pub fn get_request_logs(
     page: u32,
     page_size: u32,
 ) -> Result<PaginatedLogs, AppError> {
+    ensure_usage_app(filters.app_type.as_deref())?;
     state.db.get_request_logs(&filters, page, page_size)
 }
 
@@ -254,6 +266,7 @@ pub fn check_provider_limits(
     provider_id: String,
     app_type: String,
 ) -> Result<crate::services::usage_stats::ProviderLimitStatus, AppError> {
+    ensure_usage_app(Some(&app_type))?;
     state.db.check_provider_limits(&provider_id, &app_type)
 }
 
@@ -278,49 +291,7 @@ pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Res
 pub fn sync_session_usage(
     state: State<'_, AppState>,
 ) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
-    // 同步 Claude 会话日志
-    let mut result = crate::services::session_usage::sync_claude_session_logs(&state.db)?;
-
-    // 同步 Codex 使用数据
-    match crate::services::session_usage_codex::sync_codex_usage(&state.db) {
-        Ok(codex_result) => {
-            result.imported += codex_result.imported;
-            result.skipped += codex_result.skipped;
-            result.files_scanned += codex_result.files_scanned;
-            result.errors.extend(codex_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("Codex 同步失败: {e}"));
-        }
-    }
-
-    // 同步 Gemini 使用数据
-    match crate::services::session_usage_gemini::sync_gemini_usage(&state.db) {
-        Ok(gemini_result) => {
-            result.imported += gemini_result.imported;
-            result.skipped += gemini_result.skipped;
-            result.files_scanned += gemini_result.files_scanned;
-            result.errors.extend(gemini_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("Gemini 同步失败: {e}"));
-        }
-    }
-
-    // 同步 OpenCode 使用数据
-    match crate::services::session_usage_opencode::sync_opencode_usage(&state.db) {
-        Ok(opencode_result) => {
-            result.imported += opencode_result.imported;
-            result.skipped += opencode_result.skipped;
-            result.files_scanned += opencode_result.files_scanned;
-            result.errors.extend(opencode_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("OpenCode 同步失败: {e}"));
-        }
-    }
-
-    Ok(result)
+    crate::services::session_usage::sync_claude_session_logs(&state.db)
 }
 
 /// 获取数据来源分布

@@ -1,13 +1,44 @@
 #![allow(non_snake_case)]
 
-use tauri::{AppHandle, Emitter};
-use tauri_plugin_updater::UpdaterExt;
+use tauri::AppHandle;
 
-/// 应用更新下载进度（通过 `update-download-progress` 事件发给前端）。
-#[derive(Clone, serde::Serialize)]
-struct UpdateDownloadProgress {
-    downloaded: u64,
-    total: Option<u64>,
+fn validate_claude_only_settings_update(
+    incoming: &crate::settings::AppSettings,
+    existing: &crate::settings::AppSettings,
+) -> Result<(), String> {
+    let mut changed = Vec::new();
+    macro_rules! reject_change {
+        ($field:ident) => {
+            if incoming.$field != existing.$field {
+                changed.push(stringify!($field));
+            }
+        };
+    }
+
+    reject_change!(codex_config_dir);
+    reject_change!(gemini_config_dir);
+    reject_change!(grok_config_dir);
+    reject_change!(opencode_config_dir);
+    reject_change!(openclaw_config_dir);
+    reject_change!(hermes_config_dir);
+    reject_change!(current_provider_codex);
+    reject_change!(current_provider_gemini);
+    reject_change!(current_provider_grokbuild);
+    reject_change!(current_provider_opencode);
+    reject_change!(current_provider_openclaw);
+    reject_change!(current_provider_hermes);
+    reject_change!(preserve_codex_official_auth_on_switch);
+    reject_change!(unify_codex_session_history);
+    reject_change!(unify_codex_migrate_existing);
+
+    if changed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "CC Gateway settings cannot modify non-Claude fields: {}",
+            changed.join(", ")
+        ))
+    }
 }
 
 fn merge_settings_for_save(
@@ -64,6 +95,7 @@ pub async fn save_settings(
     settings: crate::settings::AppSettings,
 ) -> Result<bool, String> {
     let existing = crate::settings::get_settings();
+    validate_claude_only_settings_update(&settings, &existing)?;
     let merged = merge_settings_for_save(settings, &existing);
     let unify_codex_changed =
         merged.unify_codex_session_history != existing.unify_codex_session_history;
@@ -189,81 +221,14 @@ pub async fn restart_app(app: AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
-/// 下载并安装应用更新，然后由后端直接重启应用。
-///
-/// macOS 更新会原地替换 `.app` bundle。如果先返回前端、再让旧 WebView 调
-/// `process.relaunch()`，旧进程可能已经处在 bundle 被替换后的不稳定窗口期。
-/// 这里把退出清理、安装和重启串在同一个后端流程中，避免依赖旧前端继续执行。
+/// CC Gateway v0.1 distributes unsigned pre-release packages and intentionally
+/// does not perform in-app updates.
 #[tauri::command]
-pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> {
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| format!("初始化更新器失败: {e}"))?;
-
-    let Some(update) = updater
-        .check()
-        .await
-        .map_err(|e| format!("检查更新失败: {e}"))?
-    else {
-        return Ok(false);
-    };
-
-    log::info!("开始下载应用更新: {}", update.version);
-    let progress_handle = app.clone();
-    let mut downloaded: u64 = 0;
-    let bytes = update
-        .download(
-            move |chunk_len, content_len| {
-                downloaded = downloaded.saturating_add(chunk_len as u64);
-                let _ = progress_handle.emit(
-                    "update-download-progress",
-                    UpdateDownloadProgress {
-                        downloaded,
-                        total: content_len,
-                    },
-                );
-            },
-            || {},
-        )
-        .await
-        .map_err(|e| format!("下载更新失败: {e}"))?;
-
-    log::info!("开始安装应用更新: {}", update.version);
-
-    #[cfg(target_os = "windows")]
-    {
-        // Windows updater 会在 install() 内启动安装器并直接退出当前进程
-        // （插件内部 std::process::exit(0)，绕过 TrayIcon::drop、不发
-        // NIM_DELETE，会残留死图标——与托盘"退出"路径相同的问题）。
-        // 因此清理只能放在 install 前执行，且必须显式移除托盘图标。
-        crate::save_window_state_before_exit(&app);
-        crate::cleanup_before_exit(&app).await;
-        crate::remove_tray_icon_before_exit(&app);
-        crate::destroy_single_instance_lock(&app);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        update.install(bytes).map_err(|e| {
-            format!(
-                "Windows 更新安装失败: {e}。已执行退出前清理，代理或 Live 接管可能已暂停；请重启应用或重新开启代理后再试。"
-            )
-        })?;
-        Ok(true)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // macOS/Linux install() 会返回；先安装，避免安装失败时误停代理/撤回接管。
-        update
-            .install(bytes)
-            .map_err(|e| format!("安装更新失败: {e}"))?;
-
-        crate::save_window_state_before_exit(&app);
-        crate::cleanup_before_exit(&app).await;
-
-        log::info!("应用更新安装完成，正在重启应用");
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        crate::restart_process(&app);
-    }
+pub async fn install_update_and_restart(_app: AppHandle) -> Result<bool, String> {
+    Err(
+        "CC Gateway v0.1 has in-app updates disabled; install a release package manually"
+            .to_string(),
+    )
 }
 
 /// 检查是否有可用的应用更新，返回可用的新版本号（无更新时返回 None）。
@@ -272,16 +237,8 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> 
 /// 已是最新版本，但数据库仍不兼容（通常由第三方客户端或更高版本创建），应提示用户
 /// 升级无法解决，而不是让其反复尝试。
 #[tauri::command]
-pub async fn check_app_update_available(app: AppHandle) -> Result<Option<String>, String> {
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| format!("初始化更新器失败: {e}"))?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| format!("检查更新失败: {e}"))?;
-    Ok(update.map(|u| u.version))
+pub async fn check_app_update_available(_app: AppHandle) -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 /// 获取 app_config_dir 覆盖配置 (从 Store)
@@ -314,7 +271,7 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_settings_for_save;
+    use super::{merge_settings_for_save, validate_claude_only_settings_update};
     use crate::settings::{
         AppSettings, CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
         CodexThirdPartyHistoryProviderBucketMigration, LocalMigrations, S3SyncSettings,
@@ -617,6 +574,37 @@ mod tests {
         let merged = merge_settings_for_save(incoming, &existing);
 
         assert!(merged.local_migrations.is_none());
+    }
+
+    #[test]
+    fn save_settings_rejects_non_claude_directory_and_provider_changes() {
+        let existing = AppSettings::default();
+        let incoming = AppSettings {
+            codex_config_dir: Some("/tmp/foreign-codex".to_string()),
+            current_provider_gemini: Some("foreign-gemini".to_string()),
+            ..AppSettings::default()
+        };
+
+        let error = validate_claude_only_settings_update(&incoming, &existing)
+            .expect_err("non-Claude settings must be immutable through public IPC");
+        assert!(error.contains("codex_config_dir"), "{error}");
+        assert!(error.contains("current_provider_gemini"), "{error}");
+    }
+
+    #[test]
+    fn save_settings_allows_claude_directory_and_provider_changes() {
+        let existing = AppSettings::default();
+        let incoming = AppSettings {
+            claude_config_dir: Some("/tmp/claude".to_string()),
+            current_provider_claude: Some("anyrouter".to_string()),
+            current_provider_claude_desktop: Some("anyrouter-desktop".to_string()),
+            ..AppSettings::default()
+        };
+
+        assert_eq!(
+            validate_claude_only_settings_update(&incoming, &existing),
+            Ok(())
+        );
     }
 }
 

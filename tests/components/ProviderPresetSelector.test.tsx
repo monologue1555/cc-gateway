@@ -60,7 +60,6 @@ type TestPresetEntry = {
     websiteUrl: string;
     settingsConfig: Record<string, never>;
     category: ProviderCategory;
-    primePartner?: boolean;
   };
 };
 
@@ -227,71 +226,6 @@ describe("ProviderPresetSelector pure helpers", () => {
         }),
       ),
     ).toEqual(["alpha", "beta", "delta", "gamma"]);
-  });
-
-  it("original 模式按「官方 → 尊享伙伴 → 其余」三段排序，各组内部保序且双重身份不重复", () => {
-    // 故意打乱传入顺序，验证：
-    // - official 组置顶（officialOnly、officialPrime 按出现顺序）；
-    // - 非官方且 primePartner 的预设居中（primeOnly）；
-    // - 其余保持传入顺序（restFirst、restLast）；
-    // - 既是 official 又是 primePartner 的预设只归入官方组、不在 prime 组重复。
-    const mixed: TestPresetEntry[] = [
-      {
-        id: "restFirst",
-        preset: {
-          name: "Rest First",
-          websiteUrl: "https://rest-first.example.com",
-          settingsConfig: {},
-          category: "third_party",
-        },
-      },
-      {
-        id: "primeOnly",
-        preset: {
-          name: "Prime Only",
-          websiteUrl: "https://prime-only.example.com",
-          settingsConfig: {},
-          category: "cn_official",
-          primePartner: true,
-        },
-      },
-      {
-        id: "officialOnly",
-        preset: {
-          name: "Official Only",
-          websiteUrl: "https://official-only.example.com",
-          settingsConfig: {},
-          category: "official",
-        },
-      },
-      {
-        id: "officialPrime",
-        preset: {
-          name: "Official Prime",
-          websiteUrl: "https://official-prime.example.com",
-          settingsConfig: {},
-          category: "official",
-          primePartner: true,
-        },
-      },
-      {
-        id: "restLast",
-        preset: {
-          name: "Rest Last",
-          websiteUrl: "https://rest-last.example.com",
-          settingsConfig: {},
-          category: "aggregator",
-        },
-      },
-    ];
-
-    expect(getIds(sortPresetEntries(mixed, "original", t))).toEqual([
-      "officialOnly",
-      "officialPrime",
-      "primeOnly",
-      "restFirst",
-      "restLast",
-    ]);
   });
 });
 

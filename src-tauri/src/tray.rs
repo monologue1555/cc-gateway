@@ -98,7 +98,7 @@ impl TrayTexts {
         match language {
             "en" => Self {
                 show_main: "Open main window",
-                open_website: "Open Official Website",
+                open_website: "Open Project Repository",
                 no_providers_label: "(no providers)",
                 lightweight_mode: "Lightweight Mode",
                 quit: "Quit",
@@ -108,7 +108,7 @@ impl TrayTexts {
             },
             "ja" => Self {
                 show_main: "メインウィンドウを開く",
-                open_website: "公式サイトを開く",
+                open_website: "プロジェクトリポジトリを開く",
                 no_providers_label: "(プロバイダーなし)",
                 lightweight_mode: "軽量モード",
                 quit: "終了",
@@ -118,7 +118,7 @@ impl TrayTexts {
             },
             "zh-TW" => Self {
                 show_main: "開啟主介面",
-                open_website: "開啟官方網站",
+                open_website: "開啟專案儲存庫",
                 no_providers_label: "(無供應商)",
                 lightweight_mode: "輕量模式",
                 quit: "退出",
@@ -128,7 +128,7 @@ impl TrayTexts {
             },
             _ => Self {
                 show_main: "打开主界面",
-                open_website: "打开官方网站",
+                open_website: "打开项目仓库",
                 no_providers_label: "(无供应商)",
                 lightweight_mode: "轻量模式",
                 quit: "退出",
@@ -151,38 +151,15 @@ pub struct TrayAppSection {
 
 /// Auto 菜单项后缀
 pub const AUTO_SUFFIX: &str = "auto";
-pub const TRAY_ID: &str = "cc-switch";
+pub const TRAY_ID: &str = "cc-gateway";
 
-pub const TRAY_SECTIONS: [TrayAppSection; 4] = [
-    TrayAppSection {
-        app_type: AppType::Claude,
-        prefix: "claude_",
-        empty_id: "claude_empty",
-        header_label: "Claude",
-        log_name: "Claude",
-    },
-    TrayAppSection {
-        app_type: AppType::Codex,
-        prefix: "codex_",
-        empty_id: "codex_empty",
-        header_label: "Codex",
-        log_name: "Codex",
-    },
-    TrayAppSection {
-        app_type: AppType::Gemini,
-        prefix: "gemini_",
-        empty_id: "gemini_empty",
-        header_label: "Gemini",
-        log_name: "Gemini",
-    },
-    TrayAppSection {
-        app_type: AppType::GrokBuild,
-        prefix: "grokbuild_",
-        empty_id: "grokbuild_empty",
-        header_label: "Grok Build",
-        log_name: "Grok Build",
-    },
-];
+pub const TRAY_SECTIONS: [TrayAppSection; 1] = [TrayAppSection {
+    app_type: AppType::Claude,
+    prefix: "claude_",
+    empty_id: "claude_empty",
+    header_label: "Claude",
+    log_name: "Claude",
+}];
 
 /// 配色阈值（与前端 `utilizationColor` 语义一致）。
 const UTIL_WARN_PCT: f64 = 70.0;
@@ -728,7 +705,7 @@ pub fn create_tray_menu(
                         provider,
                     );
                 let label = if is_official_blocked {
-                    format!("{} \u{26D4}", &provider.name) // ⛔ emoji
+                    format!("{} \u{26D4}", provider.name) // ⛔ emoji
                 } else {
                     provider.name.clone()
                 };
@@ -967,8 +944,11 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
             }
         }
         "open_website" => {
-            if let Err(e) = app.opener().open_url("https://ccswitch.io", None::<String>) {
-                log::error!("打开官方网站失败: {e}");
+            if let Err(e) = app.opener().open_url(
+                "https://github.com/monologue1555/cc-gateway",
+                None::<String>,
+            ) {
+                log::error!("打开项目仓库失败: {e}");
             }
         }
         "lightweight_mode" => {
@@ -1131,7 +1111,7 @@ mod tests {
 
     #[test]
     fn tray_id_is_unique_to_app() {
-        assert_eq!(TRAY_ID, "cc-switch");
+        assert_eq!(TRAY_ID, "cc-gateway");
         assert_ne!(TRAY_ID, "main");
     }
 
@@ -1189,15 +1169,9 @@ mod tests {
     }
 
     #[test]
-    fn tray_sections_include_grokbuild_provider_switching() {
-        let section = TRAY_SECTIONS
-            .iter()
-            .find(|section| section.app_type == AppType::GrokBuild)
-            .expect("Grok Build tray section should exist");
-
-        assert_eq!(section.prefix, "grokbuild_");
-        assert_eq!(section.empty_id, "grokbuild_empty");
-        assert_eq!(section.header_label, "Grok Build");
+    fn tray_sections_expose_only_claude_code() {
+        assert_eq!(TRAY_SECTIONS.len(), 1);
+        assert_eq!(TRAY_SECTIONS[0].app_type, AppType::Claude);
     }
 
     fn make_quota(tool: &str, success: bool, tiers: Vec<QuotaTier>) -> SubscriptionQuota {

@@ -1086,12 +1086,18 @@ command = "legacy-cmd"
             updated.settings_config.get("permissions"),
             "provider edits should propagate into Claude live config during takeover"
         );
-        assert_eq!(
+        let local_token = live
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
+            .and_then(|value| value.as_str())
+            .expect("Claude Code local gateway token");
+        assert!(local_token.starts_with("ccg-code-"));
+        assert_ne!(local_token, "token-updated");
+        assert!(
             live.get("env")
                 .and_then(|env| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|v| v.as_str()),
-            Some("PROXY_MANAGED"),
-            "takeover placeholder should stay intact"
+                .is_none(),
+            "upstream API key must not be exposed to Claude Code"
         );
         assert_eq!(
             live.get("env")
@@ -1342,7 +1348,7 @@ requires_openai_auth = true
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!("http://127.0.0.1:15722/claude-desktop"),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));

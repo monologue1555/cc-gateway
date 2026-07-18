@@ -3,6 +3,7 @@
 mod agent_gateway;
 mod auth;
 mod balance;
+mod claude_adapters;
 mod codex_oauth;
 mod coding_plan;
 mod config;
@@ -30,6 +31,7 @@ mod stream_check;
 mod subscription;
 mod sync_support;
 
+mod legacy_import;
 mod lightweight;
 mod s3_sync;
 mod usage;
@@ -39,6 +41,7 @@ mod workspace;
 pub use agent_gateway::*;
 pub use auth::*;
 pub use balance::*;
+pub use claude_adapters::*;
 pub use codex_oauth::*;
 pub use coding_plan::*;
 pub use config::*;
@@ -65,6 +68,7 @@ pub use skill::*;
 pub use stream_check::*;
 pub use subscription::*;
 
+pub use legacy_import::*;
 pub use lightweight::*;
 pub use s3_sync::*;
 pub use usage::*;

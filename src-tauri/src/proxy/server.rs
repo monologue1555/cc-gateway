@@ -48,6 +48,8 @@ pub struct ProxyState {
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
+    /// CC Gateway 最近 50 条脱敏请求诊断（不含正文、请求头或凭据）。
+    pub diagnostics: Arc<super::diagnostics::GatewayDiagnostics>,
 }
 
 /// 代理HTTP服务器
@@ -81,6 +83,7 @@ impl ProxyServer {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle,
             failover_manager,
+            diagnostics: super::diagnostics::gateway_diagnostics_store(),
         };
 
         Self {
@@ -278,6 +281,11 @@ impl ProxyServer {
             .collect();
 
         status
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_snapshot(&self) -> Vec<super::diagnostics::GatewayDiagnosticEntry> {
+        self.state.diagnostics.snapshot()
     }
 
     /// 更新某个应用类型当前“目标供应商”（用于 UI 展示 active_targets）

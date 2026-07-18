@@ -9,6 +9,7 @@
 
 use super::{
     content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
+    diagnostics::{observe_gateway_stream, GatewayProtocol, GatewayRequestDiagnostic},
     error_mapper::{get_error_message, map_proxy_error_to_status},
     forwarder::ActiveConnectionGuard,
     handler_config::{
@@ -33,9 +34,9 @@ use super::{
         transform_gemini, transform_responses,
     },
     response_processor::{
-        create_logged_passthrough_stream, process_response, read_decoded_body,
-        strip_entity_headers_for_rebuilt_body, strip_hop_by_hop_response_headers,
-        usage_logging_enabled, SseUsageCollector,
+        create_logged_passthrough_stream, process_response, process_response_with_diagnostics,
+        read_decoded_body, strip_entity_headers_for_rebuilt_body,
+        strip_hop_by_hop_response_headers, usage_logging_enabled, SseUsageCollector,
     },
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -59,6 +60,7 @@ pub async fn health_check() -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
         Json(json!({
+            "service": "cc-gateway",
             "status": "healthy",
             "timestamp": chrono::Utc::now().to_rfc3339(),
         })),
@@ -107,13 +109,13 @@ pub async fn handle_agent_models(
     crate::agent_gateway::ensure_provider_chain_compatible(&providers)
         .map_err(ProxyError::ConfigError)?;
     let provider = providers.first().ok_or(ProxyError::NoAvailableProvider)?;
-    let data = crate::agent_gateway::model_catalog(&provider)
+    let data = crate::agent_gateway::model_catalog(provider)
         .into_iter()
         .map(|model| {
             json!({
                 "id": model.id,
                 "object": "model",
-                "owned_by": "cc-switch",
+                "owned_by": "cc-gateway",
                 "supports1m": model.supports_1m,
             })
         })
@@ -169,7 +171,55 @@ pub async fn handle_messages(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
+    validate_canonical_claude_code_request(&state, &request)?;
     handle_messages_for_app(state, request, AppType::Claude, "Claude", "claude", None).await
+}
+
+fn validate_canonical_claude_code_request(
+    state: &ProxyState,
+    request: &axum::extract::Request,
+) -> Result<(), ProxyError> {
+    let profile = crate::agent_gateway::connection_profile::load_profile(state.db.as_ref())
+        .map_err(|error| ProxyError::DatabaseError(error.to_string()))?;
+    if !profile.enabled {
+        return Ok(());
+    }
+
+    let peer = request
+        .extensions()
+        .get::<std::net::SocketAddr>()
+        .ok_or_else(|| ProxyError::AuthError("Claude Code Gateway 无法确认客户端地址".into()))?;
+    if !peer.ip().is_loopback() {
+        return Err(ProxyError::AuthError(
+            "Claude Code Gateway 仅允许 localhost 客户端".into(),
+        ));
+    }
+
+    let expected = crate::claude_runtime::get_or_create_claude_code_token(state.db.as_ref())
+        .map_err(|error| ProxyError::AuthError(error.to_string()))?;
+    let bearer = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, token)| token.trim());
+    let x_api_key = request
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    if bearer
+        .into_iter()
+        .chain(x_api_key)
+        .any(|candidate| crate::claude_runtime::claude_code_token_matches(&expected, candidate))
+    {
+        Ok(())
+    } else {
+        Err(ProxyError::AuthError(
+            "Claude Code Gateway Key 缺失或无效".into(),
+        ))
+    }
 }
 
 pub async fn handle_claude_desktop_messages(
@@ -243,27 +293,30 @@ async fn handle_messages_for_app(
 
     // 转发请求
     let forwarder = ctx.create_forwarder(&state);
-    let mut result = match forwarder
-        .forward_with_retry(
-            &app_type,
-            method,
-            endpoint,
-            body.clone(),
-            headers,
-            extensions,
-            ctx.get_providers(),
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(mut err) => {
-            if let Some(provider) = err.provider.take() {
-                ctx.provider = provider;
+    let mut result =
+        match forwarder
+            .forward_with_retry(
+                &app_type,
+                method,
+                endpoint,
+                body.clone(),
+                headers,
+                extensions,
+                ctx.get_providers(),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(mut err) => {
+                if let Some(provider) = err.provider.take() {
+                    ctx.provider = provider;
+                }
+                log_forward_error(&state, &ctx, is_stream, &err.error);
+                gateway_request_diagnostic(&state, &ctx, GatewayProtocol::Anthropic)
+                    .record_terminal(false, None, "forward_error");
+                return Err(err.error);
             }
-            log_forward_error(&state, &ctx, is_stream, &err.error);
-            return Err(err.error);
-        }
-    };
+        };
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
@@ -274,6 +327,7 @@ async fn handle_messages_for_app(
         .unwrap_or_else(|| get_claude_api_format(&ctx.provider))
         .to_string();
     let response = result.response;
+    let diagnostic = gateway_request_diagnostic(&state, &ctx, GatewayProtocol::Anthropic);
 
     // 检查是否需要格式转换（OpenRouter 等中转服务）
     let adapter = get_adapter(&app_type);
@@ -281,7 +335,7 @@ async fn handle_messages_for_app(
 
     // Claude 特有：格式转换处理
     if needs_transform {
-        return handle_claude_transform(
+        let result = handle_claude_transform(
             response,
             &ctx,
             &state,
@@ -289,19 +343,42 @@ async fn handle_messages_for_app(
             is_stream,
             &api_format,
             connection_guard,
+            Some(diagnostic.clone()),
         )
         .await;
+        if result.is_err() {
+            diagnostic.record_terminal(false, Some(diagnostic.elapsed_ms()), "transform_error");
+        }
+        return result;
     }
 
     // 通用响应处理（透传模式）
-    process_response(
+    process_response_with_diagnostics(
         response,
         &ctx,
         &state,
         &CLAUDE_PARSER_CONFIG,
         connection_guard,
+        Some(diagnostic),
     )
     .await
+}
+
+fn gateway_request_diagnostic(
+    state: &ProxyState,
+    ctx: &RequestContext,
+    protocol: GatewayProtocol,
+) -> GatewayRequestDiagnostic {
+    GatewayRequestDiagnostic::new(
+        state.diagnostics.clone(),
+        protocol,
+        ctx.request_model.clone(),
+        ctx.outbound_model
+            .clone()
+            .unwrap_or_else(|| ctx.request_model.clone()),
+        ctx.provider.name.clone(),
+        ctx.start_time,
+    )
 }
 
 fn validate_claude_desktop_gateway_auth(
@@ -501,36 +578,41 @@ pub async fn handle_agent_messages(
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let endpoint = endpoint_with_query(&parts.uri, "/v1/messages");
     let forwarder = ctx.create_forwarder(&state);
-    let mut result = match forwarder
-        .forward_with_retry(
-            &AppType::ClaudeDesktop,
-            parts.method,
-            &endpoint,
-            body,
-            headers,
-            parts.extensions,
-            providers,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(mut error) => {
-            if let Some(provider) = error.provider.take() {
-                ctx.provider = provider;
+    let mut result =
+        match forwarder
+            .forward_with_retry(
+                &AppType::ClaudeDesktop,
+                parts.method,
+                &endpoint,
+                body,
+                headers,
+                parts.extensions,
+                providers,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(mut error) => {
+                if let Some(provider) = error.provider.take() {
+                    ctx.provider = provider;
+                }
+                log_forward_error(&state, &ctx, is_stream, &error.error);
+                gateway_request_diagnostic(&state, &ctx, GatewayProtocol::Anthropic)
+                    .record_terminal(false, None, "forward_error");
+                return Err(error.error);
             }
-            log_forward_error(&state, &ctx, is_stream, &error.error);
-            return Err(error.error);
-        }
-    };
+        };
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
-    process_response(
+    let diagnostic = gateway_request_diagnostic(&state, &ctx, GatewayProtocol::Anthropic);
+    process_response_with_diagnostics(
         result.response,
         &ctx,
         &state,
         &CLAUDE_PARSER_CONFIG,
         connection_guard,
+        Some(diagnostic),
     )
     .await
 }
@@ -622,6 +704,7 @@ fn spawn_claude_usage_log(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_claude_transform(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
@@ -630,8 +713,12 @@ async fn handle_claude_transform(
     is_stream: bool,
     api_format: &str,
     connection_guard: Option<ActiveConnectionGuard>,
+    diagnostic: Option<GatewayRequestDiagnostic>,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
+    let diagnostic_first_byte_ms = diagnostic
+        .as_ref()
+        .map(GatewayRequestDiagnostic::elapsed_ms);
     let is_codex_oauth = ctx
         .provider
         .meta
@@ -759,7 +846,14 @@ async fn handle_claude_transform(
             axum::http::HeaderValue::from_static("no-cache"),
         );
 
-        let body = axum::body::Body::from_stream(logged_stream);
+        let body = match diagnostic {
+            Some(diagnostic) => axum::body::Body::from_stream(observe_gateway_stream(
+                logged_stream,
+                diagnostic,
+                status.is_success(),
+            )),
+            None => axum::body::Body::from_stream(logged_stream),
+        };
         return Ok((headers, body).into_response());
     }
 
@@ -883,10 +977,22 @@ async fn handle_claude_transform(
     })?;
 
     let body = axum::body::Body::from(response_body);
-    builder.body(body).map_err(|e| {
+    let response = builder.body(body).map_err(|e| {
         log::error!("[Claude] 构建响应失败: {e}");
         ProxyError::Internal(format!("Failed to build response: {e}"))
-    })
+    })?;
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.record_terminal(
+            status.is_success(),
+            diagnostic_first_byte_ms,
+            if status.is_success() {
+                "completed"
+            } else {
+                "http_error"
+            },
+        );
+    }
+    Ok(response)
 }
 
 fn endpoint_with_query(uri: &axum::http::Uri, endpoint: &str) -> String {
@@ -1019,27 +1125,38 @@ pub async fn handle_agent_chat_completions(
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, is_stream, &error.error);
+            gateway_request_diagnostic(&state, &ctx, GatewayProtocol::Chat).record_terminal(
+                false,
+                None,
+                "forward_error",
+            );
             return Err(error.error);
         }
     };
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
+    let diagnostic = gateway_request_diagnostic(&state, &ctx, GatewayProtocol::Chat);
     let response = result.response;
     let status = response.status();
+    let diagnostic_first_byte_ms = Some(diagnostic.elapsed_ms());
     if !status.is_success() {
-        return process_response(
+        return process_response_with_diagnostics(
             response,
             &ctx,
             &state,
             &CLAUDE_PARSER_CONFIG,
             connection_guard,
+            Some(diagnostic),
         )
         .await;
     }
 
     let upstream_is_sse = response.is_sse();
-    ensure_agent_chat_stream_contract(is_stream, upstream_is_sse)?;
+    if let Err(error) = ensure_agent_chat_stream_contract(is_stream, upstream_is_sse) {
+        diagnostic.record_terminal(false, diagnostic_first_byte_ms, "protocol_error");
+        return Err(error);
+    }
 
     if upstream_is_sse {
         let stream = create_chat_completions_sse_stream(response.bytes_stream(), include_usage);
@@ -1099,6 +1216,7 @@ pub async fn handle_agent_chat_completions(
             ctx.streaming_timeout_config(),
             connection_guard,
         );
+        let logged = observe_gateway_stream(logged, diagnostic, status.is_success());
         let mut response_headers = axum::http::HeaderMap::new();
         response_headers.insert(
             axum::http::header::CONTENT_TYPE,
@@ -1118,13 +1236,23 @@ pub async fn handle_agent_chat_completions(
             std::time::Duration::ZERO
         };
     let (mut response_headers, _, response_body) =
-        read_decoded_body(response, ctx.tag, body_timeout).await?;
+        match read_decoded_body(response, ctx.tag, body_timeout).await {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                diagnostic.record_terminal(false, diagnostic_first_byte_ms, "response_error");
+                return Err(error);
+            }
+        };
     let anthropic_response: Value = serde_json::from_slice(&response_body).map_err(|error| {
+        diagnostic.record_terminal(false, diagnostic_first_byte_ms, "transform_error");
         ProxyError::TransformError(format!("Failed to parse Anthropic response: {error}"))
     })?;
     spawn_claude_usage_log(&state, &ctx, &anthropic_response, status.as_u16(), false);
     let chat_response =
-        transform_agent_chat_anthropic::anthropic_response_to_chat_completion(anthropic_response)?;
+        transform_agent_chat_anthropic::anthropic_response_to_chat_completion(anthropic_response)
+            .inspect_err(|_error| {
+            diagnostic.record_terminal(false, diagnostic_first_byte_ms, "transform_error");
+        })?;
     strip_entity_headers_for_rebuilt_body(&mut response_headers);
     strip_hop_by_hop_response_headers(&mut response_headers);
     response_headers.remove(axum::http::header::CONTENT_TYPE);
@@ -1138,9 +1266,19 @@ pub async fn handle_agent_chat_completions(
     );
     let response_body = serde_json::to_vec(&chat_response)
         .map_err(|error| ProxyError::TransformError(error.to_string()))?;
-    builder
+    let response = builder
         .body(axum::body::Body::from(response_body))
-        .map_err(|error| ProxyError::Internal(error.to_string()))
+        .map_err(|error| ProxyError::Internal(error.to_string()));
+    match response {
+        Ok(response) => {
+            diagnostic.record_terminal(true, diagnostic_first_byte_ms, "completed");
+            Ok(response)
+        }
+        Err(error) => {
+            diagnostic.record_terminal(false, diagnostic_first_byte_ms, "response_build_error");
+            Err(error)
+        }
+    }
 }
 
 pub async fn handle_chat_completions(
@@ -1285,39 +1423,48 @@ async fn handle_agent_responses_inner(
     let client_endpoint = "/responses";
     let endpoint = endpoint_with_query(&parts.uri, "/v1/messages");
     let forwarder = ctx.create_forwarder(&state);
-    let mut result = match forwarder
-        .forward_with_retry(
-            &AppType::ClaudeDesktop,
-            parts.method,
-            &endpoint,
-            anthropic_body,
-            headers,
-            parts.extensions,
-            providers,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(mut error) => {
-            if let Some(provider) = error.provider.take() {
-                ctx.provider = provider;
+    let mut result =
+        match forwarder
+            .forward_with_retry(
+                &AppType::ClaudeDesktop,
+                parts.method,
+                &endpoint,
+                anthropic_body,
+                headers,
+                parts.extensions,
+                providers,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(mut error) => {
+                if let Some(provider) = error.provider.take() {
+                    ctx.provider = provider;
+                }
+                log_forward_error(&state, &ctx, is_stream, &error.error);
+                gateway_request_diagnostic(&state, &ctx, GatewayProtocol::Responses)
+                    .record_terminal(false, None, "forward_error");
+                return build_codex_proxy_error_response(&ctx, client_endpoint, &error.error);
             }
-            log_forward_error(&state, &ctx, is_stream, &error.error);
-            return build_codex_proxy_error_response(&ctx, client_endpoint, &error.error);
-        }
-    };
+        };
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
-    handle_codex_anthropic_to_responses_transform(
+    let diagnostic = gateway_request_diagnostic(&state, &ctx, GatewayProtocol::Responses);
+    let response = handle_codex_anthropic_to_responses_transform(
         result.response,
         &ctx,
         &state,
         is_stream,
         connection_guard,
         tool_context,
+        Some(diagnostic.clone()),
     )
-    .await
+    .await;
+    if response.is_err() {
+        diagnostic.record_terminal(false, Some(diagnostic.elapsed_ms()), "transform_error");
+    }
+    response
 }
 
 pub async fn handle_responses(
@@ -1408,6 +1555,7 @@ async fn handle_responses_for_app(
             is_stream,
             connection_guard,
             codex_tool_context,
+            None,
         )
         .await;
     }
@@ -1523,6 +1671,7 @@ async fn handle_responses_compact_for_app(
             is_stream,
             connection_guard,
             codex_tool_context,
+            None,
         )
         .await;
     }
@@ -1789,10 +1938,17 @@ async fn handle_codex_anthropic_to_responses_transform(
     is_stream: bool,
     connection_guard: Option<ActiveConnectionGuard>,
     codex_tool_context: transform_codex_chat::CodexToolContext,
+    diagnostic: Option<GatewayRequestDiagnostic>,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
+    let diagnostic_first_byte_ms = diagnostic
+        .as_ref()
+        .map(GatewayRequestDiagnostic::elapsed_ms);
 
     if !status.is_success() {
+        if let Some(diagnostic) = diagnostic.as_ref() {
+            diagnostic.record_terminal(false, diagnostic_first_byte_ms, "http_error");
+        }
         return handle_codex_chat_error_response(response, ctx, status).await;
     }
 
@@ -1809,6 +1965,7 @@ async fn handle_codex_anthropic_to_responses_transform(
             state,
             status,
             connection_guard,
+            diagnostic,
         );
     }
 
@@ -1856,6 +2013,7 @@ async fn handle_codex_anthropic_to_responses_transform(
             state,
             status,
             connection_guard,
+            diagnostic,
         );
     }
 
@@ -1929,12 +2087,24 @@ async fn handle_codex_anthropic_to_responses_transform(
         ProxyError::TransformError(format!("Failed to serialize responses response: {e}"))
     })?;
 
-    builder
+    let response = builder
         .body(axum::body::Body::from(response_body))
         .map_err(|e| {
             log::error!("[Codex] Failed to build Responses response: {e}");
             ProxyError::Internal(format!("Failed to build response: {e}"))
-        })
+        })?;
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.record_terminal(
+            status.is_success(),
+            diagnostic_first_byte_ms,
+            if status.is_success() {
+                "completed"
+            } else {
+                "http_error"
+            },
+        );
+    }
+    Ok(response)
 }
 
 fn build_codex_anthropic_sse_response(
@@ -1943,6 +2113,7 @@ fn build_codex_anthropic_sse_response(
     state: &ProxyState,
     status: StatusCode,
     connection_guard: Option<ActiveConnectionGuard>,
+    diagnostic: Option<GatewayRequestDiagnostic>,
 ) -> Result<axum::response::Response, ProxyError> {
     let usage_collector = if usage_logging_enabled(state) {
         let state = state.clone();
@@ -2008,6 +2179,14 @@ fn build_codex_anthropic_sse_response(
         ctx.streaming_timeout_config(),
         connection_guard,
     );
+    let body = match diagnostic {
+        Some(diagnostic) => axum::body::Body::from_stream(observe_gateway_stream(
+            logged_stream,
+            diagnostic,
+            status.is_success(),
+        )),
+        None => axum::body::Body::from_stream(logged_stream),
+    };
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
@@ -2019,7 +2198,6 @@ fn build_codex_anthropic_sse_response(
         axum::http::HeaderValue::from_static("no-cache"),
     );
 
-    let body = axum::body::Body::from_stream(logged_stream);
     Ok((headers, body).into_response())
 }
 
@@ -2171,7 +2349,7 @@ fn codex_proxy_error_json(
             concat!(
                 "Upstream provider rejected the request with HTTP 413 (Payload Too Large). ",
                 "The request body exceeds the upstream gateway's size limit; this is the ",
-                "provider's server-side limit, not a CC Switch limit. ",
+                "provider's server-side limit, not a CC Gateway limit. ",
                 "Provider: {provider}; model: {model}; endpoint: {endpoint}. ",
                 "To recover, shrink the request: run /compact, remove large pasted logs or ",
                 "inline images, or ask the provider to raise its request body limit ",
@@ -2192,7 +2370,7 @@ fn codex_proxy_error_json(
             .map(|status| format!("; upstream_status: HTTP {status}"))
             .unwrap_or_default();
         format!(
-            "CC Switch local proxy failed while handling Codex endpoint {endpoint}. Provider: {provider_name}; model: {request_model}{status_fragment}; cause: {cause}"
+            "CC Gateway local proxy failed while handling Codex endpoint {endpoint}. Provider: {provider_name}; model: {request_model}{status_fragment}; cause: {cause}"
         )
     };
 
@@ -3671,7 +3849,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
         let body = codex_proxy_error_json("DeepSeek", "deepseek-chat", "/responses", &error);
 
         let message = body["error"]["message"].as_str().unwrap();
-        assert!(message.contains("CC Switch local proxy failed"));
+        assert!(message.contains("CC Gateway local proxy failed"));
         assert!(message.contains("DeepSeek"));
         assert!(message.contains("deepseek-chat"));
         assert!(message.contains("/responses"));
@@ -3716,7 +3894,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
 
         let message = body["error"]["message"].as_str().unwrap();
         // 不再误导成「本地代理失败」
-        assert!(!message.contains("CC Switch local proxy failed"));
+        assert!(!message.contains("CC Gateway local proxy failed"));
         // 明确指向上游 + 体积超限 + 可操作指引
         assert!(message.contains("413"));
         assert!(message.to_lowercase().contains("upstream"));

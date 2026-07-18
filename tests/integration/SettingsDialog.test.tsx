@@ -2,14 +2,12 @@ import React, { Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { http, HttpResponse } from "msw";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import {
   resetProviderState,
   getSettings,
   getAppConfigDirOverride,
 } from "../msw/state";
-import { server } from "../msw/server";
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -91,31 +89,6 @@ vi.mock("@/components/settings/DirectorySettings", async () => {
   return actual;
 });
 
-vi.mock("@/components/settings/ImportExportSection", () => ({
-  ImportExportSection: ({
-    status,
-    selectedFile,
-    errorMessage,
-    isImporting,
-    onSelectFile,
-    onImport,
-    onExport,
-    onClear,
-  }: any) => (
-    <div>
-      <div data-testid="import-status">{status}</div>
-      <div data-testid="selected-file">{selectedFile || "none"}</div>
-      <button onClick={onSelectFile}>settings.selectConfigFile</button>
-      <button onClick={onImport} disabled={!selectedFile || isImporting}>
-        {isImporting ? "settings.importing" : "settings.import"}
-      </button>
-      <button onClick={onExport}>settings.exportConfig</button>
-      <button onClick={onClear}>common.clear</button>
-      {errorMessage ? <span>{errorMessage}</span> : null}
-    </div>
-  ),
-}));
-
 vi.mock("@/components/settings/AboutSection", () => ({
   AboutSection: ({ isPortable }: any) => <div>about:{String(isPortable)}</div>,
 }));
@@ -155,10 +128,10 @@ describe("SettingsPage integration", () => {
     const appInput = await screen.findByPlaceholderText(
       "settings.browsePlaceholderApp",
     );
-    expect((appInput as HTMLInputElement).value).toBe("/home/mock/.cc-switch");
+    expect((appInput as HTMLInputElement).value).toBe("/home/mock/.cc-gateway");
   });
 
-  it("imports configuration and triggers success callback", async () => {
+  it("previews and selectively imports only legacy Claude data", async () => {
     const onImportSuccess = vi.fn();
     renderDialog({ onImportSuccess });
 
@@ -168,19 +141,18 @@ describe("SettingsPage integration", () => {
 
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
     fireEvent.click(screen.getByText("settings.advanced.data.title"));
-    fireEvent.click(screen.getByText("settings.selectConfigFile"));
-    await waitFor(() =>
-      expect(screen.getByTestId("selected-file").textContent).toContain(
-        "/mock/import-settings.json",
-      ),
-    );
+    fireEvent.click(screen.getByText("选择旧数据库并预览"));
+    await screen.findByText("cc-switch.db");
+    await screen.findByText("仅导入预览中的 Claude 数据");
 
-    fireEvent.click(screen.getByText("settings.import"));
+    fireEvent.click(screen.getByText("仅导入预览中的 Claude 数据"));
     await waitFor(() => expect(toastSuccessMock).toHaveBeenCalled());
     await waitFor(() => expect(onImportSuccess).toHaveBeenCalled(), {
       timeout: 4000,
     });
-    expect(getSettings().language).toBe("en");
+    expect(getSettings().language).toBe("zh");
+    expect(screen.getByText("选择性导入完成")).toBeInTheDocument();
+    expect(screen.queryByText("settings.exportConfig")).not.toBeInTheDocument();
   });
 
   it("saves settings and handles restart prompt", async () => {
@@ -226,15 +198,15 @@ describe("SettingsPage integration", () => {
     const appInput = (await screen.findByPlaceholderText(
       "settings.browsePlaceholderApp",
     )) as HTMLInputElement;
-    expect(appInput.value).toBe("/home/mock/.cc-switch");
+    expect(appInput.value).toBe("/home/mock/.cc-gateway");
 
     fireEvent.click(browseButtons[0]);
     await waitFor(() =>
-      expect(appInput.value).toBe("/home/mock/.cc-switch/picked"),
+      expect(appInput.value).toBe("/home/mock/.cc-gateway/picked"),
     );
 
     fireEvent.click(resetButtons[0]);
-    await waitFor(() => expect(appInput.value).toBe("/home/mock/.cc-switch"));
+    await waitFor(() => expect(appInput.value).toBe("/home/mock/.cc-gateway"));
 
     const claudeInput = (await screen.findByPlaceholderText(
       "settings.browsePlaceholderClaude",
@@ -251,7 +223,7 @@ describe("SettingsPage integration", () => {
     await waitFor(() => expect(claudeInput.value).toBe("/home/mock/.claude"));
   });
 
-  it("notifies when export fails", async () => {
+  it("does not expose legacy whole-database import or export actions", async () => {
     renderDialog();
 
     await waitFor(() =>
@@ -260,35 +232,11 @@ describe("SettingsPage integration", () => {
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
     fireEvent.click(screen.getByText("settings.advanced.data.title"));
 
-    server.use(
-      http.post("http://tauri.local/save_file_dialog", () =>
-        HttpResponse.json(null),
-      ),
-    );
-    fireEvent.click(screen.getByText("settings.exportConfig"));
-
-    await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
-    const cancelMessage = toastErrorMock.mock.calls.at(-1)?.[0] as string;
-    expect(cancelMessage).toMatch(
-      /settings\.selectFileFailed|请选择.*保存路径/,
-    );
-
-    toastErrorMock.mockClear();
-
-    server.use(
-      http.post("http://tauri.local/save_file_dialog", () =>
-        HttpResponse.json("/mock/export-settings.json"),
-      ),
-      http.post("http://tauri.local/export_config_to_file", () =>
-        HttpResponse.json({ success: false, message: "disk-full" }),
-      ),
-    );
-
-    fireEvent.click(screen.getByText("settings.exportConfig"));
-
-    await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
-    const exportMessage = toastErrorMock.mock.calls.at(-1)?.[0] as string;
-    expect(exportMessage).toContain("disk-full");
-    expect(toastSuccessMock).not.toHaveBeenCalled();
+    expect(screen.getByText("从旧 CC Switch 选择性导入")).toBeInTheDocument();
+    expect(
+      screen.getByText(/导入只更新 CC Gateway 自己的数据库/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("settings.import")).not.toBeInTheDocument();
+    expect(screen.queryByText("settings.exportConfig")).not.toBeInTheDocument();
   });
 });

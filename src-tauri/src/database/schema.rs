@@ -122,11 +122,12 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 8. Proxy Config 表（三行结构，app_type 主键）
+        // 8. Claude runtime consumer configuration (legacy rows remain readable
+        // during selective migration but are outside the CC Gateway product UI).
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_config (
-            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
+            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','claude-desktop','codex','gemini','grokbuild')),
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
-            listen_port INTEGER NOT NULL DEFAULT 15721, enable_logging INTEGER NOT NULL DEFAULT 1,
+            listen_port INTEGER NOT NULL DEFAULT 15722, enable_logging INTEGER NOT NULL DEFAULT 1,
             enabled INTEGER NOT NULL DEFAULT 0, auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
             max_retries INTEGER NOT NULL DEFAULT 3, streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
             streaming_idle_timeout INTEGER NOT NULL DEFAULT 120, non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
@@ -153,6 +154,26 @@ impl Database {
                 [],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
+            // Pre-v16 tables have a CHECK constraint that rejects this row.
+            // Their migration adds it after rebuilding the table.
+            let proxy_config_schema = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proxy_config'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap_or_default();
+            if proxy_config_schema.contains("'claude-desktop'") {
+                conn.execute(
+                    "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
+                    streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
+                    circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
+                    circuit_error_rate_threshold, circuit_min_requests)
+                    VALUES ('claude-desktop', 6, 90, 180, 600, 8, 3, 90, 0.7, 15)",
+                    [],
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            }
             conn.execute(
                 "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
@@ -505,6 +526,11 @@ impl Database {
                         log::info!("迁移数据库从 v14 到 v15（Skills/MCP 添加 Grok Build 支持）");
                         Self::migrate_v14_to_v15(conn)?;
                         Self::set_user_version(conn, 15)?;
+                    }
+                    15 => {
+                        log::info!("迁移数据库从 v15 到 v16（CC Gateway Claude Desktop consumer 与独立端口）");
+                        Self::migrate_v15_to_v16(conn)?;
+                        Self::set_user_version(conn, 16)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1399,7 +1425,7 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         conn.execute(
             "CREATE TABLE proxy_config_v14 (
-                app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
+                app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','claude-desktop','codex','gemini','grokbuild')),
                 proxy_enabled INTEGER NOT NULL DEFAULT 0,
                 listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
                 listen_port INTEGER NOT NULL DEFAULT 15721,
@@ -1510,6 +1536,76 @@ impl Database {
         Ok(())
     }
 
+    /// v15 -> v16: make Claude Desktop a first-class consumer of the shared
+    /// listener and move CC Gateway away from CC Switch's legacy port.
+    fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_config")? {
+            return Ok(());
+        }
+
+        conn.execute("DROP TABLE IF EXISTS proxy_config_v16", [])?;
+        conn.execute(
+            "CREATE TABLE proxy_config_v16 (
+                app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','claude-desktop','codex','gemini','grokbuild')),
+                proxy_enabled INTEGER NOT NULL DEFAULT 0,
+                listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
+                listen_port INTEGER NOT NULL DEFAULT 15722,
+                enable_logging INTEGER NOT NULL DEFAULT 1,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 3,
+                streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
+                streaming_idle_timeout INTEGER NOT NULL DEFAULT 120,
+                non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
+                circuit_failure_threshold INTEGER NOT NULL DEFAULT 4,
+                circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
+                circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
+                circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
+                circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+                default_cost_multiplier TEXT NOT NULL DEFAULT '1',
+                pricing_model_source TEXT NOT NULL DEFAULT 'response',
+                live_takeover_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO proxy_config_v16 (
+                app_type, proxy_enabled, listen_address, listen_port, enable_logging,
+                enabled, auto_failover_enabled, max_retries,
+                streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
+                circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
+                circuit_error_rate_threshold, circuit_min_requests,
+                default_cost_multiplier, pricing_model_source, live_takeover_active,
+                created_at, updated_at
+            )
+            SELECT app_type, proxy_enabled, listen_address,
+                   CASE WHEN listen_port = 15721 THEN 15722 ELSE listen_port END,
+                   enable_logging, enabled, auto_failover_enabled, max_retries,
+                   streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
+                   circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
+                   circuit_error_rate_threshold, circuit_min_requests,
+                   default_cost_multiplier, pricing_model_source, live_takeover_active,
+                   created_at, updated_at
+            FROM proxy_config
+            WHERE app_type IN ('claude','codex','gemini','grokbuild')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO proxy_config_v16 (
+                app_type, max_retries, streaming_first_byte_timeout,
+                streaming_idle_timeout, non_streaming_timeout,
+                circuit_failure_threshold, circuit_success_threshold,
+                circuit_timeout_seconds, circuit_error_rate_threshold, circuit_min_requests
+            ) VALUES ('claude-desktop', 6, 90, 180, 600, 8, 3, 90, 0.7, 15)",
+            [],
+        )?;
+        conn.execute("DROP TABLE proxy_config", [])?;
+        conn.execute("ALTER TABLE proxy_config_v16 RENAME TO proxy_config", [])?;
+        Ok(())
+    }
+
     /// 插入默认模型定价数据
     /// 格式: (model_id, display_name, input, output, cache_read, cache_creation)
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
@@ -1541,7 +1637,7 @@ impl Database {
                 "0.50",
                 "6.25",
             ),
-            // Claude Sonnet 5（list 价，与 Sonnet 4.6 一致；促销 $2/$10 至 2026-08-31 不入表）
+            // Claude Sonnet 5（list 价，与 Sonnet 4.6 一致）
             (
                 "claude-sonnet-5",
                 "Claude Sonnet 5",

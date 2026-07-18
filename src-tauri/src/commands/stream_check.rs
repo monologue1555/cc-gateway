@@ -21,6 +21,12 @@ pub async fn stream_check_provider(
     app_type: AppType,
     provider_id: String,
 ) -> Result<StreamCheckResult, AppError> {
+    if !crate::product_scope::is_supported_app_type(&app_type) {
+        return Err(AppError::InvalidInput(format!(
+            "Application '{}' is unsupported by CC Gateway",
+            app_type.as_str()
+        )));
+    }
     let config = state.db.get_stream_check_config()?;
 
     let providers = state.db.get_all_providers(app_type.as_str())?;
@@ -52,6 +58,12 @@ pub async fn stream_check_all_providers(
     app_type: AppType,
     proxy_targets_only: bool,
 ) -> Result<Vec<(String, StreamCheckResult)>, AppError> {
+    if !crate::product_scope::is_supported_app_type(&app_type) {
+        return Err(AppError::InvalidInput(format!(
+            "Application '{}' is unsupported by CC Gateway",
+            app_type.as_str()
+        )));
+    }
     let config = state.db.get_stream_check_config()?;
     let providers = state.db.get_all_providers(app_type.as_str())?;
 

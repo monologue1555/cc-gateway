@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "CC Switch",
+    "title": "CC Gateway",
     "description": "Claude Code / Codex / Gemini CLI 全方位辅助工具"
   },
   "common": {
@@ -43,9 +43,9 @@
     "notSet": "未设置"
   },
   "firstRunNotice": {
-    "title": "欢迎使用 CC Switch",
-    "bodyDefault": "CC Switch 可以帮你在 Claude Code / Codex / Gemini CLI 的多个供应商之间一键切换。如果你之前已经配置过这些工具，CC Switch 会自动把现有设置保存为名为 “default” 的供应商，保证你的配置不会丢失。",
-    "bodyOfficial": "列表里还预置了 “官方（Official）” 供应商，随时点一下即可切回官方默认配置。切换前 CC Switch 会自动把当前配置备份回 default，可以放心来回切。CC Switch 就是这样工作的 😊",
+    "title": "欢迎使用 CC Gateway",
+    "bodyDefault": "CC Gateway 可以帮你在 Claude Code / Codex / Gemini CLI 的多个供应商之间一键切换。如果你之前已经配置过这些工具，CC Gateway 会自动把现有设置保存为名为 “default” 的供应商，保证你的配置不会丢失。",
+    "bodyOfficial": "列表里还预置了 “官方（Official）” 供应商，随时点一下即可切回官方默认配置。切换前 CC Gateway 会自动把当前配置备份回 default，可以放心来回切。CC Gateway 就是这样工作的 😊",
     "confirm": "我知道了"
   },
   "apiKeyInput": {
@@ -143,7 +143,6 @@
     "duplicate": "复制",
     "sortUpdateFailed": "排序更新失败",
     "configureUsage": "配置用量查询",
-    "officialPartner": "官方合作伙伴",
     "managedByHermes": "Hermes 托管",
     "managedByHermesHint": "该条目定义在 Hermes 的 providers: dict，请在 Hermes Web UI 中编辑或删除。",
     "openTerminal": "打开终端",
@@ -192,7 +191,7 @@
     "modeProxy": "需要路由",
     "modelMappingToggle": "需要模型映射",
     "modelMappingOffHint": "仅当供应商直接接受 Claude Desktop 可识别的三档角色 ID（claude-sonnet-* / claude-opus-* / claude-haiku-*）时才适用直连；其他模型名（含 claude-3-5-sonnet-… 等旧式 ID）请打开此开关走映射。",
-    "modelMappingOnHint": "Claude Desktop 只接受 claude-sonnet-* / claude-opus-* / claude-haiku-* 三档角色 ID。开启后 CC Switch 会把这三档映射到供应商的实际模型，并在使用期间保持本地路由开启。",
+    "modelMappingOnHint": "Claude Desktop 只接受 claude-sonnet-* / claude-opus-* / claude-haiku-* 三档角色 ID。开启后 CC Gateway 会把这三档映射到供应商的实际模型，并在使用期间保持本地路由开启。",
     "routeMapTitle": "模型映射",
     "routeMapHint": "为 Sonnet、Opus、Haiku 三档分别填写实际请求模型；菜单显示名可写 DeepSeek、Kimi 等品牌名。留空的档会自动沿用 Sonnet（或第一个已填档）的模型，确保子 agent 调用的 Haiku 始终可用。",
     "routeModelLabel": "模型角色",
@@ -233,7 +232,7 @@
     "codexRestartRequired": "切换成功，请重启客户端以生效",
     "grokBuildRestartRequired": "切换成功，请重启 Grok Build 以生效",
     "claudeDesktopRestartRequired": "切换成功，重启 Claude Desktop 后生效",
-    "claudeDesktopProxyRestartRequired": "切换成功，请保持 CC Switch 运行，并重启 Claude Desktop 后生效",
+    "claudeDesktopProxyRestartRequired": "切换成功，请保持 CC Gateway 运行，并重启 Claude Desktop 后生效",
     "addToConfigSuccess": "已添加到配置",
     "removeFromConfigSuccess": "已从配置移除",
     "switchFailedTitle": "切换失败",
@@ -275,7 +274,7 @@
     "deleteProvider": "删除供应商",
     "deleteProviderMessage": "确定要删除供应商 \"{{name}}\" 吗？此操作无法撤销。",
     "removeProvider": "移除供应商",
-    "removeProviderMessage": "确定要从配置中移除供应商 \"{{name}}\" 吗？\n\n移除后该供应商将不再生效，但配置数据会保留在 CC Switch 中，您可以随时重新添加。",
+    "removeProviderMessage": "确定要从配置中移除供应商 \"{{name}}\" 吗？\n\n移除后该供应商将不再生效，但配置数据会保留在 CC Gateway 中，您可以随时重新添加。",
     "proxy": {
       "title": "启用本地路由服务",
       "message": "本地路由是一项高级功能，启用前请确保您已了解其工作原理。\n\n建议先查阅相关文档或咨询您的供应商，以获取正确的配置方式。",
@@ -288,7 +287,7 @@
     },
     "unifyCodexHistory": {
       "title": "统一 Codex 会话历史",
-      "message": "开启后，官方订阅与第三方将共用同一个会话历史列表。注意：跨供应商继续旧会话时，可能因对方后端无法解密 encrypted_content 推理内容而失败。\n\n可选择同时把现有官方会话历史迁入共享列表（迁移前自动备份到 ~/.cc-switch/backups，关闭开关时可选择恢复）。",
+      "message": "开启后，官方订阅与第三方将共用同一个会话历史列表。注意：跨供应商继续旧会话时，可能因对方后端无法解密 encrypted_content 推理内容而失败。\n\n可选择同时把现有官方会话历史迁入共享列表（迁移前自动备份到 ~/.cc-gateway/backups，关闭开关时可选择恢复）。",
       "migrateExisting": "同时迁入现有官方会话历史",
       "confirm": "我已了解，继续开启"
     },
@@ -357,7 +356,7 @@
       },
       "globalProxy": {
         "title": "全局出站代理",
-        "description": "配置 CC Switch 访问外部 API 时使用的代理"
+        "description": "配置 CC Gateway 访问外部 API 时使用的代理"
       },
       "data": {
         "title": "数据管理",
@@ -428,7 +427,7 @@
     "themeDark": "深色",
     "themeSystem": "跟随系统",
     "importExport": "SQL 导入导出",
-    "importExportHint": "导入/导出数据库 SQL 备份（仅支持导入由 CC Switch 导出的备份），便于备份或迁移。",
+    "importExportHint": "导入/导出数据库 SQL 备份（仅支持导入由 CC Gateway 导出的备份），便于备份或迁移。",
     "exportConfig": "导出 SQL 备份",
     "selectConfigFile": "选择 SQL 文件",
     "noFileSelected": "尚未选择配置文件。",
@@ -666,7 +665,7 @@
     "windowBehavior": "窗口行为",
     "windowBehaviorHint": "配置窗口最小化与 Claude 插件联动策略。",
     "launchOnStartup": "开机自启",
-    "launchOnStartupDescription": "随系统启动自动运行 CC Switch",
+    "launchOnStartupDescription": "随系统启动自动运行 CC Gateway",
     "silentStartup": "静默启动",
     "silentStartupDescription": "程序启动时不显示主窗口，仅在系统托盘运行",
     "autoLaunchFailed": "设置开机自启失败",
@@ -699,10 +698,10 @@
     },
     "skillStorage": {
       "title": "Skills 存储位置",
-      "description": "选择 CC Switch 存放 Skills 主副本的目录",
-      "ccSwitch": "CC Switch",
+      "description": "选择 CC Gateway 存放 Skills 主副本的目录",
+      "ccSwitch": "CC Gateway",
       "unified": "~/.agents/skills",
-      "ccSwitchHint": "技能存储在 ~/.cc-switch/skills/，由 CC Switch 统一管理并同步到各应用。",
+      "ccSwitchHint": "技能存储在 ~/.cc-gateway/skills/，由 CC Gateway 统一管理并同步到 Claude Code。",
       "unifiedHint": "技能存储在 ~/.agents/skills/，遵循 Agent Skills 开放标准。兼容的工具（Claude Code、Codex、Gemini CLI 等）可直接发现此目录中的技能。",
       "confirmTitle": "迁移技能存储",
       "confirmMessage": "将移动 {{count}} 个技能到新位置，是否继续？",
@@ -748,9 +747,9 @@
     },
     "configDirectoryOverride": "配置目录覆盖（高级）",
     "configDirectoryDescription": "在 WSL 等环境使用 Claude Code 或 Codex 的时候，可手动指定为 WSL 里的配置目录，供应商数据与主环境保持一致。",
-    "appConfigDir": "CC Switch 配置目录",
-    "appConfigDirDescription": "自定义 CC Switch 的配置存储位置（指定到云同步文件夹即可云同步配置）",
-    "browsePlaceholderApp": "例如：C:\\Users\\Administrator\\.cc-switch",
+    "appConfigDir": "CC Gateway 配置目录",
+    "appConfigDirDescription": "自定义 CC Gateway 的配置存储位置（指定到云同步文件夹即可云同步配置）",
+    "browsePlaceholderApp": "例如：C:\\Users\\Administrator\\.cc-gateway",
     "claudeConfigDir": "Claude Code 配置目录",
     "claudeConfigDirDescription": "覆盖 Claude 配置目录 (settings.json)。真正自定义目录会在目录内存放 Claude MCP 的 .claude.json；默认 ~/.claude 目录仍使用 Claude 默认的 ~/.claude.json。",
     "codexConfigDir": "Codex 配置目录",
@@ -836,7 +835,7 @@
     "importFailedError": "导入配置失败：{{message}}",
     "exportFailedError": "导出配置失败:",
     "restartRequired": "需要重启应用",
-    "restartRequiredMessage": "修改 CC Switch 配置目录后需要重启应用才能生效，是否立即重启？",
+    "restartRequiredMessage": "修改 CC Gateway 配置目录后需要重启应用才能生效，是否立即重启？",
     "restartNow": "立即重启",
     "restartLater": "稍后重启",
     "restartFailed": "应用重启失败，请手动关闭后重新打开。",
@@ -1015,44 +1014,6 @@
     "omoHint": "💡 OMO 配置管理 Agent 模型分配，兼容 oh-my-openagent.jsonc / oh-my-opencode.jsonc",
     "officialHint": "💡 官方供应商使用浏览器登录，无需配置 API Key",
     "getApiKey": "获取 API Key",
-    "partnerPromotion": {
-      "sudocode": "SudoCode 让 Claude Code 与 Claude Desktop 接入 Claude Opus 4.8，Codex 接入 GPT-5.6，一个 Key 统一使用。CC Switch 用户注册并加入 QQ 群 726213516，联系群主领取 ¥10 试用额度。",
-      "code0": "code0.ai 是面向开发者的 AI 编程服务平台，支持 Claude Code、Codex、Gemini。CC Switch 用户专属福利：通过官网联系客服即可领取测试额度！",
-      "nekocode": "NekoCode 为开发者提供稳定、高效、可靠的 Claude、Codex 等 AI 模型 API 中转服务，价格透明、按量计费。CC Switch 用户专享 9 折：通过上方链接注册，充值时输入优惠码 cc-switch 即享 9 折优惠！",
-      "packycode": "PackyCode 是 CC Switch 的官方合作伙伴，使用此链接注册并在充值时填写 \"cc-switch\" 优惠码，可以享受9折优惠",
-      "apikeyfun": "APIKEY.FUN 为 CC Switch 的用户提供了特别优惠，通过专属链接注册，可享受最高充值永久 95 折优惠。",
-      "apinebula": "APINEBULA 为 CC Switch 用户提供特别优惠：使用专属链接注册并在充值时填写 \"ccswitch\" 优惠码，可享九折优惠。",
-      "atlascloud": "Atlas Cloud 是一个全模态 AI 推理平台，通过单一 API 为开发者提供视频生成、图像生成及 LLM 接入。立即查看全新“编程计划”优惠，获取更具性价比的 API 接入。",
-      "patewayai": "PatewayAI 为 CC Switch 的用户提供了特别福利，通过此链接注册可以获得3美元额度。",
-      "claudeapi": "ClaudeAPI 为 CC Switch 的用户提供了特别福利，通过此链接注册可以领取测试额度。",
-      "claudecn": "ClaudeCN 是一家实体企业运营的企业级AI中转平台，支持企业采购流程，可对公打款、签约，服务合规有保障。",
-      "runapi": "RunAPI 为 CC Switch 的用户提供了特别福利，通过此链接注册并联系客服可领取 ¥14 免费额度。",
-      "minimax_cn": "MiniMax Coding Plan 特惠，Starter 套餐 9.9 元起",
-      "minimax_en": "MiniMax Coding Plan 黑五特惠，Starter 套餐现仅 $2/月（2折优惠！）",
-      "opencode_go": "使用此链接订阅 OpenCode Go，首月只需 $5，并可获得额外的 $5 额度！",
-      "dmxapi": "Claude Code 专属模型 3.4 折优惠进行中！",
-      "cubence": "Cubence 是 CC Switch 的官方合作伙伴，使用此链接注册并在充值时填写 \"CCSWITCH\" 优惠码，每次充值均可享受9折优惠",
-      "aigocode": "AIGoCode 是 CC Switch 的官方合作伙伴，使用此链接注册首次充值时可以获得10%额度奖励！",
-      "rightcode": "RightCode 是 CC Switch 的官方合作伙伴，使用此链接注册每次充值均可赠送5%额外额度！",
-      "aicodemirror": "AICodeMirror 是 CC Switch 的官方合作伙伴，使用此链接注册可享受8折优惠！",
-      "crazyrouter": "CrazyRouter 为 CC Switch 的用户提供了特殊优惠，首次充值赠予 30% 额外额度！",
-      "sssaicode": "SSAI Code 为 CC Switch 的用户提供了特殊优惠，每次充值赠予额外 $10 额度！",
-      "siliconflow": "硅基流动是 CC Switch 的官方合作伙伴",
-      "ucloud": "优云智算为CC Switch 的用户提供了特殊优惠，通过此链接注册，可以获得五元平台体验金！",
-      "micu": "Micu 是 CC Switch 的官方合作伙伴",
-      "etok": "官网加入ETok社群，订阅套餐。",
-      "shengsuanyun": "胜算云为 CC Switch 的用户提供了特别福利，使用此链接注册的新用户可获 10 元模力及首充 10% 赠送！",
-      "doubaoseed": "豆包大模型为 CC Switch 的用户提供了专属福利：通过此链接注册即可获取豆包全系列文本模型 50万tokens推理额度以及Seedance2.0的500万tokens免费额度",
-      "volcengine_agentplan": "火山方舟 Coding Plan 为 CC Switch 的用户提供了专属福利：通过此链接订阅方舟 Coding Plan，新客户首两个月享 2.5 折优惠，再用专属邀请码 6J6FV5N2 领取奖励叠加 9.5 折，低至 9.4 元/月！",
-      "byteplus": "通过此链接注册即可获取每个模型50万tokens的免费推理额度。",
-      "ccsub": "CCSub 是稳定、实惠的 AI API 中转平台，Claude Code 官方订阅的超强平替，一个 Key 覆盖全部模型，价格约为官方 1/3。",
-      "subrouter": "SubRouter 是中转站聚合平台，一个 Key 可接入多个模型与供应商。",
-      "qiniu": "七牛云是多协议 AI 中转平台，一个 Key 即可调用原生 Claude、GPT、Gemini 模型，兼容 Anthropic、OpenAI、Gemini 多种接口。",
-      "fenno": "Fenno.ai 是稳定高效的 API 中转服务商，可接入多种主流模型。CC Switch 用户专属福利：通过此链接订阅 9.9 元 /150 刀额度的超值 Coding Plan！",
-      "zetaapi": "ZetaAPI 主打模型不掺水、不降智，价格低至官方价 35 折。CC Switch 用户专属福利：通过此链接注册，首次充值使用优惠码 CC-SWITCH 即可享受九折优惠！",
-      "teamorouter": "TeamoRouter 是企业级 Agentic LLM 网关，价格最高可达 90% 折扣。为 CC Switch 的用户提供了特别福利：新用户通过此链接注册，首次充值享 10% 折扣！",
-      "unity2": "Unity2.ai 为 CC Switch 用户提供专属福利：通过此链接注册可领取 $2 余额，加入官方群再送 $10，最高可领 $12 免费额度！"
-    },
     "presets": {
       "ucloud": "优云智算",
       "ucloudCoding": "优云智算Coding Plan",
@@ -1385,7 +1346,7 @@
     "headerName": "请求头",
     "headerValue": "值",
     "headerNamePlaceholder": "X-Title",
-    "headerValuePlaceholder": "CC Switch",
+    "headerValuePlaceholder": "CC Gateway",
     "removeHeader": "删除请求头",
     "noHeaders": "暂无自定义请求头",
     "extraOptions": "额外选项",
@@ -1683,7 +1644,7 @@
   },
   "dbUpgrade": {
     "title": "数据库版本过新",
-    "description": "当前数据库由更新版本的 CC Switch 创建，需要升级应用后才能继续使用。升级不会删除你的数据。",
+    "description": "当前数据库由更新版本的 CC Gateway 创建，需要升级应用后才能继续使用。升级不会删除你的数据。",
     "versionInfo": "数据库版本 v{{db}} · 应用支持 v{{supported}}",
     "dbPath": "数据库文件",
     "checking": "正在检查可用更新…",
@@ -1726,7 +1687,7 @@
       "deleteConfirm": "确定要删除服务器 \"{{id}}\" 吗？此操作无法撤销。",
       "noServers": "暂无服务器",
       "enabledApps": "启用的应用",
-      "noImportFound": "未发现需要导入的 MCP 服务器。所有服务器已在 CC Switch 统一管理中。",
+      "noImportFound": "未发现需要导入的 MCP 服务器。所有服务器已在 CC Gateway 统一管理中。",
       "importSuccess": "成功导入 {{count}} 个 MCP 服务器",
       "apps": {
         "claude": "Claude",
@@ -2307,10 +2268,10 @@
     "noInstalledDescription": "从仓库发现并安装技能，或导入已有的技能",
     "discover": "发现技能",
     "import": "导入已有",
-    "importDescription": "选择要导入到 CC Switch 统一管理的技能",
+    "importDescription": "选择要导入到 CC Gateway 统一管理的技能",
     "importSuccess": "成功导入 {{count}} 个技能",
     "importSelected": "导入已选 ({{count}})",
-    "noUnmanagedFound": "未发现需要导入的技能。所有技能已在 CC Switch 统一管理中。",
+    "noUnmanagedFound": "未发现需要导入的技能。所有技能已在 CC Gateway 统一管理中。",
     "unmanagedAvailable": "发现可导入的技能",
     "foundIn": "发现于",
     "local": "本地",
@@ -2355,7 +2316,7 @@
   },
   "deeplink": {
     "confirmImport": "确认导入供应商配置",
-    "confirmImportDescription": "以下配置将导入到 CC Switch",
+    "confirmImportDescription": "以下配置将导入到 CC Gateway",
     "importPrompt": "导入提示词",
     "importPromptDescription": "请确认是否导入此系统提示词",
     "importMcp": "导入 MCP Servers",
@@ -2519,7 +2480,7 @@
         },
         "listenPort": {
           "label": "监听端口",
-          "placeholder": "15721",
+          "placeholder": "15722",
           "description": "路由服务器监听的端口号（1024 ~ 65535）"
         },
         "maxRetries": {
@@ -2953,7 +2914,7 @@
   },
   "agentGateway": {
     "title": "Agent Gateway",
-    "description": "让其他 Agent 通过本地端点复用 Claude Desktop 的 Anthropic Messages（原生）路由",
+    "description": "让其他工具通过本地端点复用 canonical AnyRouter Claude 路由",
     "service": "Gateway 服务",
     "running": "Agent 入口已启用",
     "stopped": "Agent 入口已停用",
@@ -2963,11 +2924,11 @@
       "chat": "Chat Completions"
     },
     "compatibility": {
-      "compatible": "当前 Claude Desktop 路由兼容",
-      "incompatible": "当前 Claude Desktop 路由不兼容",
-      "supported": "Agent Gateway 会直接复用这条原生 Anthropic 路由。",
-      "unsupported": "MVP 仅支持 API 格式为 Anthropic Messages（原生）的 Claude Desktop 供应商。",
-      "enableBlocked": "请先切换到 Anthropic Messages（原生）供应商"
+      "compatible": "canonical AnyRouter 路由兼容",
+      "incompatible": "canonical AnyRouter 路由尚不可用",
+      "supported": "Backend Gateway 会复用与 Claude Code、Claude Desktop 相同的原生 Anthropic 路由。",
+      "unsupported": "请先在主界面的 AnyRouter 与模型目录中保存有效 Key，并启用该连接。",
+      "enableBlocked": "请先保存并启用 canonical AnyRouter 连接"
     },
     "token": {
       "title": "Gateway Key",
@@ -2980,21 +2941,21 @@
       "confirmAction": "生成并复制"
     },
     "providers": {
-      "title": "跟随 Claude Desktop 的 Anthropic 原生路由",
-      "description": "Gateway 不维护第二套路由配置；MVP 仅跟随 Anthropic Messages（原生）供应商，不支持 Desktop 的 OpenAI Chat、OpenAI Responses 或 Gemini Native 格式。",
-      "current": "Claude Desktop 当前供应商",
-      "readOnly": "自动跟随",
+      "title": "canonical AnyRouter 上游",
+      "description": "Gateway 不维护第二份 Key 或模型映射；三种本地协议都读取同一 canonical Claude Profile。",
+      "current": "当前上游连接",
+      "readOnly": "canonical",
       "routePolicy": "路由策略",
-      "failover": "由 Claude Desktop 路由统一决定，Agent Gateway 不单独修改。",
+      "failover": "由 canonical 模型目录统一决定，Backend Gateway 不单独保存映射。",
       "failoverOn": "跟随自动切换",
       "failoverOff": "跟随当前供应商",
       "emulateClaudeCode": "补齐 Claude Code 客户端指纹",
-      "emulateClaudeCodeHint": "所有请求都会沿用 Claude Desktop 本地路由；开启后额外补齐 Claude Code 的 User-Agent、x-app 与系统提示，仅在中转站要求时启用。",
-      "empty": "Claude Desktop 当前没有可用的本地路由，请先在 Claude 页启用一个供应商。"
+      "emulateClaudeCodeHint": "所有请求都沿用 canonical AnyRouter 路由，并默认补齐 Claude Code 的 User-Agent、x-app 与系统提示；仅连接标准 Anthropic API 时关闭。",
+      "empty": "尚无可用连接，请先保存并启用主界面的 AnyRouter 配置。"
     },
     "models": {
       "title": "可用模型",
-      "description": "模型目录、别名与角色回落沿用当前兼容的 Claude Desktop Anthropic 原生路由。",
+      "description": "模型目录、别名与角色回落来自同一 canonical Claude Profile。",
       "count": "个",
       "details": "查看模型 ID 与上游映射",
       "empty": "当前路由没有可暴露的模型。请先配置供应商模型映射。"

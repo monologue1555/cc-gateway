@@ -5,6 +5,22 @@ use crate::deeplink::{
 use crate::store::AppState;
 use tauri::State;
 
+fn ensure_public_deeplink_request(request: &DeepLinkImportRequest) -> Result<(), String> {
+    if let Some(app_id) = request.app.as_deref() {
+        crate::product_scope::parse_public_app_type(app_id)?;
+    }
+    if let Some(app_ids) = request.apps.as_deref() {
+        for app_id in app_ids.split(',').map(str::trim) {
+            if app_id != "claude" {
+                return Err(format!(
+                    "Application '{app_id}' is unsupported by CC Gateway deep links"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse a deep link URL and return the parsed request for frontend confirmation
 #[tauri::command]
 pub fn parse_deeplink(url: String) -> Result<DeepLinkImportRequest, String> {
@@ -18,6 +34,7 @@ pub fn parse_deeplink(url: String) -> Result<DeepLinkImportRequest, String> {
 pub fn merge_deeplink_config(
     request: DeepLinkImportRequest,
 ) -> Result<DeepLinkImportRequest, String> {
+    ensure_public_deeplink_request(&request)?;
     log::info!("Merging config for deep link request: {:?}", request.name);
     crate::deeplink::parse_and_merge_config(&request).map_err(|e| e.to_string())
 }
@@ -28,6 +45,7 @@ pub fn import_from_deeplink(
     state: State<AppState>,
     request: DeepLinkImportRequest,
 ) -> Result<String, String> {
+    ensure_public_deeplink_request(&request)?;
     log::info!(
         "Importing provider from deep link: {:?} for app {:?}",
         request.name,
@@ -47,6 +65,7 @@ pub async fn import_from_deeplink_unified(
     state: State<'_, AppState>,
     request: DeepLinkImportRequest,
 ) -> Result<serde_json::Value, String> {
+    ensure_public_deeplink_request(&request)?;
     log::info!("Importing {} resource from deep link", request.resource);
 
     match request.resource.as_str() {

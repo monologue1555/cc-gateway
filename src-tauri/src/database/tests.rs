@@ -324,6 +324,101 @@ fn schema_create_tables_include_pricing_model_columns() {
 }
 
 #[test]
+fn fresh_schema_seeds_claude_desktop_on_the_cc_gateway_port() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    let (enabled, address, port): (i64, String, i64) = conn
+        .query_row(
+            "SELECT enabled, listen_address, listen_port
+             FROM proxy_config WHERE app_type = 'claude-desktop'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("fresh schema must seed Claude Desktop");
+
+    assert_eq!(enabled, 0);
+    assert_eq!(address, "127.0.0.1");
+    assert_eq!(port, 15722);
+}
+
+#[test]
+fn migration_v15_to_v16_adds_desktop_and_moves_only_the_legacy_gateway_port() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_config (
+            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
+            proxy_enabled INTEGER NOT NULL DEFAULT 0,
+            listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
+            listen_port INTEGER NOT NULL DEFAULT 15721,
+            enable_logging INTEGER NOT NULL DEFAULT 1,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
+            streaming_idle_timeout INTEGER NOT NULL DEFAULT 120,
+            non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
+            circuit_failure_threshold INTEGER NOT NULL DEFAULT 4,
+            circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
+            circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
+            circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
+            circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+            default_cost_multiplier TEXT NOT NULL DEFAULT '1',
+            pricing_model_source TEXT NOT NULL DEFAULT 'response',
+            live_takeover_active INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO proxy_config (app_type, proxy_enabled, listen_port, enabled)
+        VALUES ('claude', 1, 15721, 1);
+        INSERT INTO proxy_config (app_type, proxy_enabled, listen_port, enabled)
+        VALUES ('codex', 1, 18080, 1);
+        INSERT INTO proxy_config (app_type, proxy_enabled, listen_port, enabled)
+        VALUES ('gemini', 0, 15721, 0);
+        INSERT INTO proxy_config (app_type, proxy_enabled, listen_port, enabled)
+        VALUES ('grokbuild', 0, 15721, 0);
+        "#,
+    )
+    .expect("seed v15 proxy schema");
+    Database::set_user_version(&conn, 15).expect("set user_version=15");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate to v16");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        16
+    );
+    let desktop: (i64, String, i64) = conn
+        .query_row(
+            "SELECT enabled, listen_address, listen_port
+             FROM proxy_config WHERE app_type = 'claude-desktop'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("migration must add Claude Desktop");
+    assert_eq!(desktop, (0, "127.0.0.1".to_string(), 15722));
+
+    let claude: (i64, i64) = conn
+        .query_row(
+            "SELECT enabled, listen_port FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("preserve Claude row");
+    assert_eq!(claude, (1, 15722));
+
+    let codex: (i64, i64) = conn
+        .query_row(
+            "SELECT enabled, listen_port FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("preserve legacy row for selective import compatibility");
+    assert_eq!(codex, (1, 18080));
+}
+
+#[test]
 fn schema_migration_v4_adds_pricing_model_columns() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(
@@ -689,7 +784,7 @@ fn migration_from_v3_8_schema_v1_to_current_schema_v3() {
     let proxy_rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM proxy_config", [], |r| r.get(0))
         .expect("count proxy_config rows");
-    assert_eq!(proxy_rows, 4);
+    assert_eq!(proxy_rows, 5);
 
     // model_pricing 应具备默认数据（迁移时会 seed）
     let pricing_rows: i64 = conn

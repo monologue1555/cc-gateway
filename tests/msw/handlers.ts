@@ -279,7 +279,185 @@ export const handlers = [
   }),
 
   http.post(`${TAURI_ENDPOINT}/open_file_dialog`, () =>
-    success("/mock/import-settings.json"),
+    success("/mock/cc-switch.db"),
+  ),
+
+  // CC Gateway canonical Claude profile and shared runtime
+  http.post(`${TAURI_ENDPOINT}/get_claude_connection_profile`, () =>
+    success({
+      enabled: true,
+      baseUrl: "https://anyrouter.top",
+      authMode: "bearer",
+      apiFormat: "anthropic",
+      hasApiKey: true,
+      maskedApiKey: "sk-••••mock",
+      models: [
+        {
+          role: "opus",
+          displayName: "Opus 4.8",
+          clientModelId: "claude-opus-4-8[1M]",
+          upstreamModelId: "claude-opus-4-8",
+          supports1m: true,
+        },
+        {
+          role: "fable",
+          displayName: "Fable 5",
+          clientModelId: "claude-fable-5[1M]",
+          upstreamModelId: "claude-fable-5",
+          supports1m: true,
+        },
+        {
+          role: "fallback",
+          displayName: "Opus 4.6",
+          clientModelId: "claude-opus-4-6",
+          upstreamModelId: "claude-opus-4-6",
+          supports1m: false,
+        },
+      ],
+    }),
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/get_claude_adapter_state`, () =>
+    success({
+      claudeCodeEnabled: false,
+      claudeDesktopEnabled: false,
+      backendEnabled: false,
+      runtime: { phase: "disabled", consumers: [], lastError: null },
+    }),
+  ),
+
+  http.post(
+    `${TAURI_ENDPOINT}/set_claude_code_adapter_enabled`,
+    async ({ request }) => {
+      const { enabled } = await withJson<{ enabled: boolean }>(request);
+      return success({
+        claudeCodeEnabled: enabled,
+        claudeDesktopEnabled: false,
+        backendEnabled: false,
+        runtime: {
+          phase: enabled ? "ready" : "disabled",
+          consumers: enabled ? ["claude-code"] : [],
+          lastError: null,
+        },
+      });
+    },
+  ),
+
+  http.post(
+    `${TAURI_ENDPOINT}/set_claude_desktop_adapter_enabled`,
+    async ({ request }) => {
+      const { enabled } = await withJson<{ enabled: boolean }>(request);
+      return success({
+        claudeCodeEnabled: false,
+        claudeDesktopEnabled: enabled,
+        backendEnabled: false,
+        runtime: {
+          phase: enabled ? "ready" : "disabled",
+          consumers: enabled ? ["claude-desktop"] : [],
+          lastError: null,
+        },
+      });
+    },
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/get_agent_gateway_state`, () =>
+    success({
+      enabled: false,
+      compatible: true,
+      compatibilityMessage: null,
+      listenAddress: "127.0.0.1",
+      listenPort: 15722,
+      endpoints: {
+        anthropic: "http://127.0.0.1:15722/agent/v1/messages",
+        responses: "http://127.0.0.1:15722/agent/v1/responses",
+        chat: "http://127.0.0.1:15722/agent/v1/chat/completions",
+      },
+      maskedToken: "ccg-agent-••••mock",
+      currentProviderId: "cc-gateway-canonical-desktop",
+      currentProviderName: "AnyRouter",
+      autoFailoverEnabled: false,
+      emulateClaudeCode: false,
+      models: [
+        {
+          id: "claude-opus-4-8[1M]",
+          label: "Opus 4.8",
+          supports1m: true,
+          upstreamModel: "claude-opus-4-8",
+        },
+      ],
+    }),
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/get_gateway_diagnostics`, () =>
+    success([
+      {
+        requestId: "req-mock-1",
+        protocol: "anthropic",
+        requestedModel: "claude-opus-4-8[1M]",
+        upstreamModel: "claude-opus-4-8",
+        provider: "AnyRouter",
+        status: "success",
+        firstByteMs: 42,
+        endReason: "completed",
+        timestamp: "2026-07-18T00:00:00Z",
+      },
+    ]),
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/preview_legacy_cc_switch_import`, () =>
+    success({
+      providers: { claude: 1, claudeDesktop: 1 },
+      mcpServers: 2,
+      skills: 3,
+      prompts: 1,
+      profiles: 1,
+      excluded: {
+        otherAgentProviders: 4,
+        localGatewayProviders: 1,
+        gatewaySettings: 1,
+        proxyOrTakeoverRows: 2,
+        syncSettings: 1,
+        historyOrUsageRows: 5,
+      },
+      canonicalCandidate: {
+        sourceAppType: "claude-desktop",
+        sourceProviderId: "anyrouter",
+        sourceProviderName: "AnyRouter",
+        baseUrl: "https://anyrouter.top",
+        hasApiKey: true,
+        maskedApiKey: "sk-••••mock",
+        models: [],
+      },
+      warnings: [],
+    }),
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/import_legacy_cc_switch_database`, () =>
+    success({
+      imported: {
+        providers: { claude: 1, claudeDesktop: 1 },
+        mcpServers: 2,
+        skills: 3,
+        prompts: 1,
+        profiles: 1,
+      },
+      excluded: {
+        otherAgentProviders: 4,
+        localGatewayProviders: 1,
+        gatewaySettings: 1,
+        proxyOrTakeoverRows: 2,
+        syncSettings: 1,
+        historyOrUsageRows: 5,
+      },
+      canonicalProfile: {
+        imported: true,
+        replacedExisting: false,
+        reason: "已导入 canonical 连接",
+        candidate: null,
+      },
+      liveConfigurationTouched: false,
+      warnings: [],
+    }),
   ),
 
   http.post(

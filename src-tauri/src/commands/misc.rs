@@ -2,6 +2,7 @@
 
 use crate::app_config::AppType;
 use crate::init_status::{InitErrorPayload, SkillsMigrationPayload};
+use crate::product_scope::parse_public_app_type;
 use crate::services::ProviderService;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -56,7 +57,7 @@ pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
     handle
         .opener()
         .open_url(
-            "https://github.com/farion1231/cc-switch/releases/latest",
+            "https://github.com/monologue1555/cc-gateway/releases/latest",
             None::<String>,
         )
         .map_err(|e| format!("打开更新页面失败: {e}"))?;
@@ -111,9 +112,10 @@ pub struct ToolVersion {
     wsl_distro: Option<String>,
 }
 
-const VALID_TOOLS: [&str; 7] = [
+const KNOWN_TOOLS: [&str; 7] = [
     "claude", "codex", "gemini", "grok", "opencode", "openclaw", "hermes",
 ];
+const VALID_TOOLS: [&str; 1] = ["claude"];
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,12 +157,7 @@ pub async fn get_tool_versions(
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
 ) -> Result<Vec<ToolVersion>, String> {
     let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
-        let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
-        VALID_TOOLS
-            .iter()
-            .copied()
-            .filter(|t| set.contains(t))
-            .collect()
+        normalize_requested_tools(tools)?
     } else {
         VALID_TOOLS.to_vec()
     };
@@ -184,10 +181,7 @@ pub async fn run_tool_lifecycle_action(
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
 ) -> Result<(), String> {
     let action = ToolLifecycleAction::from_str(&action)?;
-    let requested = normalize_requested_tools(&tools);
-    if requested.is_empty() {
-        return Err("No supported tools selected".to_string());
-    }
+    let requested = normalize_requested_tools(&tools)?;
 
     let label = match action {
         ToolLifecycleAction::Install => "tool_install",
@@ -346,13 +340,29 @@ fn decode_windows_command_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn normalize_requested_tools(tools: &[String]) -> Vec<&'static str> {
+fn normalize_requested_tools(tools: &[String]) -> Result<Vec<&'static str>, String> {
+    let unsupported: Vec<&str> = tools
+        .iter()
+        .map(String::as_str)
+        .filter(|tool| !VALID_TOOLS.contains(tool))
+        .collect();
+    if !unsupported.is_empty() {
+        return Err(format!(
+            "Unsupported CC Gateway tools: {}; allowed tool: claude",
+            unsupported.join(", ")
+        ));
+    }
+
     let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
-    VALID_TOOLS
+    let requested = VALID_TOOLS
         .iter()
         .copied()
         .filter(|tool| set.contains(tool))
-        .collect()
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return Err("No supported tools selected; allowed tool: claude".to_string());
+    }
+    Ok(requested)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -719,7 +729,7 @@ async fn get_single_tool_version_impl(
     wsl_shell_flag: Option<&str>,
 ) -> ToolVersion {
     debug_assert!(
-        VALID_TOOLS.contains(&tool),
+        KNOWN_TOOLS.contains(&tool),
         "unexpected tool name in get_single_tool_version_impl: {tool}"
     );
 
@@ -924,7 +934,7 @@ async fn fetch_github_latest_version(client: &reqwest::Client, repo: &str) -> Op
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     match client
         .get(&url)
-        .header("User-Agent", "cc-switch")
+        .header("User-Agent", "cc-gateway")
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
@@ -1196,7 +1206,7 @@ fn try_get_version_wsl(
     use std::process::Command;
 
     // 防御性断言：tool 只能是预定义的值
-    debug_assert!(VALID_TOOLS.contains(&tool), "unexpected tool name: {tool}");
+    debug_assert!(KNOWN_TOOLS.contains(&tool), "unexpected tool name: {tool}");
 
     // 校验 distro 名称，防止命令注入
     if !is_valid_wsl_distro_name(distro) {
@@ -2526,10 +2536,7 @@ pub struct ToolInstallationReport {
 pub async fn probe_tool_installations(
     tools: Vec<String>,
 ) -> Result<Vec<ToolInstallationReport>, String> {
-    let requested = normalize_requested_tools(&tools);
-    if requested.is_empty() {
-        return Err("No supported tools selected".to_string());
-    }
+    let requested = normalize_requested_tools(&tools)?;
     tokio::task::spawn_blocking(move || {
         requested
             .into_iter()
@@ -2605,7 +2612,7 @@ pub async fn open_provider_terminal(
     #[allow(non_snake_case)] providerId: String,
     cwd: Option<String>,
 ) -> Result<bool, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let app_type = parse_terminal_app(&app)?;
     let launch_cwd = resolve_launch_cwd(cwd)?;
 
     // 获取提供商配置
@@ -2618,13 +2625,25 @@ pub async fn open_provider_terminal(
 
     // 从提供商配置中提取环境变量
     let config = &provider.settings_config;
-    let env_vars = extract_env_vars_from_config(config, &app_type);
+    let mut env_vars = extract_env_vars_from_config(config, &app_type);
+    if matches!(app_type, AppType::Claude) {
+        merge_loopback_no_proxy_from_process(&mut env_vars);
+    }
 
     // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
     launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref())
         .map_err(|e| format!("启动终端失败: {e}"))?;
 
     Ok(true)
+}
+
+fn parse_terminal_app(app: &str) -> Result<AppType, String> {
+    let app_type = parse_public_app_type(app)?;
+    if matches!(app_type, AppType::Claude) {
+        Ok(app_type)
+    } else {
+        Err("Provider terminal is available only for Claude Code".to_string())
+    }
 }
 
 /// 从提供商配置中提取环境变量
@@ -2675,6 +2694,64 @@ fn extract_env_vars_from_config(
     }
 
     env_vars
+}
+
+const LOOPBACK_NO_PROXY_ENTRIES: [&str; 5] =
+    ["127.0.0.1", "127.0.0.0/8", "localhost", "::1", "::1/128"];
+
+/// Merge provider and process proxy-bypass settings for Claude Code's local gateway.
+///
+/// The generated terminal settings carry both spellings because shells and HTTP
+/// clients differ in which one they honor. Values are de-duplicated while keeping
+/// the caller's order, and loopback destinations are always appended.
+fn merge_loopback_no_proxy_vars(
+    env_vars: &mut Vec<(String, String)>,
+    inherited_upper: Option<&str>,
+    inherited_lower: Option<&str>,
+) {
+    let mut merged = Vec::<String>::new();
+
+    let mut push_entries = |value: &str| {
+        for entry in value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+        {
+            if !merged.iter().any(|existing| existing == entry) {
+                merged.push(entry.to_string());
+            }
+        }
+    };
+
+    for (name, value) in env_vars.iter() {
+        if name.eq_ignore_ascii_case("no_proxy") {
+            push_entries(value);
+        }
+    }
+    if let Some(value) = inherited_upper {
+        push_entries(value);
+    }
+    if let Some(value) = inherited_lower {
+        push_entries(value);
+    }
+    for entry in LOOPBACK_NO_PROXY_ENTRIES {
+        push_entries(entry);
+    }
+
+    env_vars.retain(|(name, _)| !name.eq_ignore_ascii_case("no_proxy"));
+    let value = merged.join(",");
+    env_vars.push(("NO_PROXY".to_string(), value.clone()));
+    env_vars.push(("no_proxy".to_string(), value));
+}
+
+fn merge_loopback_no_proxy_from_process(env_vars: &mut Vec<(String, String)>) {
+    let inherited_upper = std::env::var("NO_PROXY").ok();
+    let inherited_lower = std::env::var("no_proxy").ok();
+    merge_loopback_no_proxy_vars(
+        env_vars,
+        inherited_upper.as_deref(),
+        inherited_lower.as_deref(),
+    );
 }
 
 fn resolve_launch_cwd(cwd: Option<String>) -> Result<Option<PathBuf>, String> {
@@ -3350,11 +3427,11 @@ pub(crate) fn launch_terminal_running(command_line: &str, label: &str) -> Result
         let content = format!(
             r#"#!/usr/bin/env sh
 trap 'rm -f "{script_path}"' EXIT
-echo "[cc-switch] Starting: {label}"
+echo "[cc-gateway] Starting: {label}"
 echo ""
 {cmd}
 echo ""
-echo "[cc-switch] Command exited. Press Enter to close."
+echo "[cc-gateway] Command exited. Press Enter to close."
 read -r _
 "#,
             script_path = file.display(),
@@ -3474,7 +3551,7 @@ read -r _
 
         let bat_file = temp_dir.join(format!("cc_switch_{}_{}.bat", label, pid));
         let content = format!(
-            "@echo off\r\necho [cc-switch] Starting: {label}\r\necho.\r\n{cmd}\r\necho.\r\necho [cc-switch] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
+            "@echo off\r\necho [cc-gateway] Starting: {label}\r\necho.\r\n{cmd}\r\necho.\r\necho [cc-gateway] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
             label = label,
             cmd = command_line,
         );
@@ -3592,6 +3669,43 @@ mod tests {
     }
 
     #[test]
+    fn claude_terminal_no_proxy_merge_preserves_existing_entries() {
+        let mut env_vars = vec![(
+            "NO_PROXY".to_string(),
+            "corp.internal,localhost".to_string(),
+        )];
+
+        merge_loopback_no_proxy_vars(
+            &mut env_vars,
+            Some("upper.example"),
+            Some("lower.example,127.0.0.1"),
+        );
+
+        for key in ["NO_PROXY", "no_proxy"] {
+            let value = env_vars
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+                .expect("merged no-proxy variable");
+            for expected in [
+                "corp.internal",
+                "upper.example",
+                "lower.example",
+                "127.0.0.1",
+                "127.0.0.0/8",
+                "localhost",
+                "::1",
+                "::1/128",
+            ] {
+                assert!(
+                    value.split(',').any(|entry| entry == expected),
+                    "{key} missing {expected}: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_build_final_shell_cd_command() {
         assert_eq!(build_final_shell_cd_command("/bin/zsh", None), "");
         assert_eq!(
@@ -3667,9 +3781,23 @@ mod tests {
     }
 
     #[test]
-    fn grok_lifecycle_metadata_is_consistent() {
-        let requested = vec!["unsupported".to_string(), "grok".to_string()];
-        assert_eq!(normalize_requested_tools(&requested), vec!["grok"]);
+    fn public_tool_commands_accept_only_claude() {
+        let requested = vec!["claude".to_string(), "claude".to_string()];
+        assert_eq!(normalize_requested_tools(&requested), Ok(vec!["claude"]));
+
+        for tool in ["codex", "gemini", "grok", "opencode", "openclaw", "hermes"] {
+            let error = normalize_requested_tools(&[tool.to_string()])
+                .expect_err("non-Claude tools must be rejected at the command boundary");
+            assert!(error.contains("allowed tool: claude"), "{error}");
+        }
+
+        assert_eq!(parse_terminal_app("claude"), Ok(AppType::Claude));
+        assert!(parse_terminal_app("claude-desktop").is_err());
+        assert!(parse_terminal_app("codex").is_err());
+    }
+
+    #[test]
+    fn grok_lifecycle_metadata_is_internally_consistent() {
         assert_eq!(tool_display_name("grok"), "Grok Build");
         assert_eq!(npm_package_for("grok"), Some("@xai-official/grok"));
         assert_eq!(

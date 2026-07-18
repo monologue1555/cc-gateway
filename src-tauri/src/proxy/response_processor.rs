@@ -4,6 +4,7 @@
 
 use super::{
     content_encoding::{decompress_body, get_content_encoding},
+    diagnostics::{observe_gateway_stream, GatewayRequestDiagnostic},
     forwarder::ActiveConnectionGuard,
     handler_config::{StreamUsageEventFilter, UsageParserConfig},
     handler_context::{RequestContext, StreamingTimeoutConfig},
@@ -150,6 +151,18 @@ pub async fn handle_streaming(
     parser_config: &UsageParserConfig,
     connection_guard: Option<ActiveConnectionGuard>,
 ) -> Response {
+    handle_streaming_with_diagnostics(response, ctx, state, parser_config, connection_guard, None)
+        .await
+}
+
+pub async fn handle_streaming_with_diagnostics(
+    response: ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    parser_config: &UsageParserConfig,
+    connection_guard: Option<ActiveConnectionGuard>,
+    diagnostic: Option<GatewayRequestDiagnostic>,
+) -> Response {
     let status = response.status();
     log::debug!(
         "[{}] 已接收上游流式响应: status={}, headers={}",
@@ -194,7 +207,14 @@ pub async fn handle_streaming(
         connection_guard,
     );
 
-    let body = axum::body::Body::from_stream(logged_stream);
+    let body = match diagnostic {
+        Some(diagnostic) => axum::body::Body::from_stream(observe_gateway_stream(
+            logged_stream,
+            diagnostic,
+            status.is_success(),
+        )),
+        None => axum::body::Body::from_stream(logged_stream),
+    };
     match builder.body(body) {
         Ok(resp) => resp,
         Err(e) => {
@@ -213,6 +233,26 @@ pub async fn handle_non_streaming(
     // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
     _connection_guard: Option<ActiveConnectionGuard>,
 ) -> Result<Response, ProxyError> {
+    handle_non_streaming_with_diagnostics(
+        response,
+        ctx,
+        state,
+        parser_config,
+        _connection_guard,
+        None,
+    )
+    .await
+}
+
+pub async fn handle_non_streaming_with_diagnostics(
+    response: ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    parser_config: &UsageParserConfig,
+    // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
+    _connection_guard: Option<ActiveConnectionGuard>,
+    diagnostic: Option<GatewayRequestDiagnostic>,
+) -> Result<Response, ProxyError> {
     // 整包超时：仅在故障转移开启且配置值非零时生效
     let body_timeout =
         if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
@@ -220,8 +260,19 @@ pub async fn handle_non_streaming(
         } else {
             Duration::ZERO
         };
+    let first_byte_ms = diagnostic
+        .as_ref()
+        .map(GatewayRequestDiagnostic::elapsed_ms);
     let (mut response_headers, status, body_bytes) =
-        read_decoded_body(response, ctx.tag, body_timeout).await?;
+        match read_decoded_body(response, ctx.tag, body_timeout).await {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                if let Some(diagnostic) = diagnostic.as_ref() {
+                    diagnostic.record_terminal(false, first_byte_ms, "response_error");
+                }
+                return Err(error);
+            }
+        };
     strip_hop_by_hop_response_headers(&mut response_headers);
 
     log::debug!(
@@ -309,10 +360,33 @@ pub async fn handle_non_streaming(
     }
 
     let body = axum::body::Body::from(body_bytes);
-    builder.body(body).map_err(|e| {
+    let response = builder.body(body).map_err(|e| {
         log::error!("[{}] 构建响应失败: {e}", ctx.tag);
         ProxyError::Internal(format!("Failed to build response: {e}"))
-    })
+    });
+
+    match response {
+        Ok(response) => {
+            if let Some(diagnostic) = diagnostic {
+                diagnostic.record_terminal(
+                    status.is_success(),
+                    first_byte_ms,
+                    if status.is_success() {
+                        "completed"
+                    } else {
+                        "http_error"
+                    },
+                );
+            }
+            Ok(response)
+        }
+        Err(error) => {
+            if let Some(diagnostic) = diagnostic {
+                diagnostic.record_terminal(false, first_byte_ms, "response_build_error");
+            }
+            Err(error)
+        }
+    }
 }
 
 /// 通用响应处理入口
@@ -325,10 +399,38 @@ pub async fn process_response(
     parser_config: &UsageParserConfig,
     connection_guard: Option<ActiveConnectionGuard>,
 ) -> Result<Response, ProxyError> {
+    process_response_with_diagnostics(response, ctx, state, parser_config, connection_guard, None)
+        .await
+}
+
+pub async fn process_response_with_diagnostics(
+    response: ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    parser_config: &UsageParserConfig,
+    connection_guard: Option<ActiveConnectionGuard>,
+    diagnostic: Option<GatewayRequestDiagnostic>,
+) -> Result<Response, ProxyError> {
     if is_sse_response(&response) {
-        Ok(handle_streaming(response, ctx, state, parser_config, connection_guard).await)
+        Ok(handle_streaming_with_diagnostics(
+            response,
+            ctx,
+            state,
+            parser_config,
+            connection_guard,
+            diagnostic,
+        )
+        .await)
     } else {
-        handle_non_streaming(response, ctx, state, parser_config, connection_guard).await
+        handle_non_streaming_with_diagnostics(
+            response,
+            ctx,
+            state,
+            parser_config,
+            connection_guard,
+            diagnostic,
+        )
+        .await
     }
 }
 
@@ -944,6 +1046,7 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            diagnostics: Arc::new(crate::proxy::diagnostics::GatewayDiagnostics::new()),
         }
     }
 

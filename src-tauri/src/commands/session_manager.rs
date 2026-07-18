@@ -4,7 +4,7 @@ use crate::session_manager;
 
 #[tauri::command]
 pub async fn list_sessions() -> Result<Vec<session_manager::SessionMeta>, String> {
-    let sessions = tauri::async_runtime::spawn_blocking(session_manager::scan_sessions)
+    let sessions = tauri::async_runtime::spawn_blocking(session_manager::scan_claude_sessions)
         .await
         .map_err(|e| format!("Failed to scan sessions: {e}"))?;
     Ok(sessions)
@@ -15,6 +15,11 @@ pub async fn get_session_messages(
     providerId: String,
     sourcePath: String,
 ) -> Result<Vec<session_manager::SessionMessage>, String> {
+    if providerId != "claude" {
+        return Err(format!(
+            "Session provider '{providerId}' is unsupported by CC Gateway"
+        ));
+    }
     let provider_id = providerId.clone();
     let source_path = sourcePath.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -64,6 +69,11 @@ pub async fn delete_session(
     sessionId: String,
     sourcePath: String,
 ) -> Result<bool, String> {
+    if providerId != "claude" {
+        return Err(format!(
+            "Session provider '{providerId}' is unsupported by CC Gateway"
+        ));
+    }
     let provider_id = providerId.clone();
     let session_id = sessionId.clone();
     let source_path = sourcePath.clone();
@@ -79,6 +89,12 @@ pub async fn delete_session(
 pub async fn delete_sessions(
     items: Vec<session_manager::DeleteSessionRequest>,
 ) -> Result<Vec<session_manager::DeleteSessionOutcome>, String> {
+    if let Some(item) = items.iter().find(|item| item.provider_id != "claude") {
+        return Err(format!(
+            "Session provider '{}' is unsupported by CC Gateway",
+            item.provider_id
+        ));
+    }
     tauri::async_runtime::spawn_blocking(move || session_manager::delete_sessions(&items))
         .await
         .map_err(|e| format!("Failed to delete sessions: {e}"))
