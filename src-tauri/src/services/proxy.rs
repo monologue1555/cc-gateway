@@ -3761,6 +3761,9 @@ mod tests {
     #[serial]
     async fn failed_claude_desktop_config_write_rolls_back_listener_and_adapter_state() {
         let home = TempHome::new();
+        #[cfg(windows)]
+        let blocked_library = home.dir.path().join("Claude-3p").join("configLibrary");
+        #[cfg(not(windows))]
         let blocked_library = home
             .dir
             .path()
@@ -3813,6 +3816,7 @@ mod tests {
         dir: TempDir,
         original_home: Option<String>,
         original_userprofile: Option<String>,
+        original_local_app_data: Option<String>,
         original_test_home: Option<String>,
     }
 
@@ -3821,16 +3825,19 @@ mod tests {
             let dir = TempDir::new().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
+            let original_local_app_data = env::var("LOCALAPPDATA").ok();
             let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
 
             env::set_var("HOME", dir.path());
             env::set_var("USERPROFILE", dir.path());
+            env::set_var("LOCALAPPDATA", dir.path());
             env::set_var("CC_SWITCH_TEST_HOME", dir.path());
 
             Self {
                 dir,
                 original_home,
                 original_userprofile,
+                original_local_app_data,
                 original_test_home,
             }
         }
@@ -3846,6 +3853,11 @@ mod tests {
             match &self.original_userprofile {
                 Some(value) => env::set_var("USERPROFILE", value),
                 None => env::remove_var("USERPROFILE"),
+            }
+
+            match &self.original_local_app_data {
+                Some(value) => env::set_var("LOCALAPPDATA", value),
+                None => env::remove_var("LOCALAPPDATA"),
             }
 
             match &self.original_test_home {
