@@ -53,9 +53,19 @@ jobs:
           cache: pnpm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95
         with:
           targets: ${{ matrix.target == 'universal-apple-darwin' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+
+      - name: Verify Rust targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ matrix.target == 'universal-apple-darwin' && 'aarch64-apple-darwin x86_64-apple-darwin' || matrix.target }}"
+          installed="$(rustup target list --installed)"
+          for target in ${expected}; do
+            grep -Fxq "${target}" <<<"${installed}"
+          done
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
