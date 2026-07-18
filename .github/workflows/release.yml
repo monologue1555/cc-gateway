@@ -89,12 +89,49 @@ jobs:
       - name: Run three-protocol gateway E2E
         run: cargo test --manifest-path src-tauri/Cargo.toml proxy::agent_gateway_tests
 
+      - name: Verify Windows Installer script engines
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engines = @(
+            @{ Registrar = "$env:windir\System32\regsvr32.exe"; Dll = "$env:windir\System32\vbscript.dll" },
+            @{ Registrar = "$env:windir\System32\regsvr32.exe"; Dll = "$env:windir\System32\jscript.dll" },
+            @{ Registrar = "$env:windir\SysWOW64\regsvr32.exe"; Dll = "$env:windir\SysWOW64\vbscript.dll" },
+            @{ Registrar = "$env:windir\SysWOW64\regsvr32.exe"; Dll = "$env:windir\SysWOW64\jscript.dll" }
+          )
+          foreach ($engine in $engines) {
+            & $engine.Registrar /s $engine.Dll
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to register $($engine.Dll)"
+            }
+          }
+
+          $probe = Join-Path $env:RUNNER_TEMP 'cc-gateway-wix-script-probe.vbs'
+          Set-Content -Path $probe -Encoding ascii -Value 'WScript.Quit 0'
+          foreach ($hostPath in @("$env:windir\System32\cscript.exe", "$env:windir\SysWOW64\cscript.exe")) {
+            & $hostPath //B //NoLogo $probe
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows Script Host probe failed: $hostPath"
+            }
+          }
+
       - name: Build unsigned bundles
         env:
           APPLE_SIGNING_IDENTITY: "-"
           TAURI_SIGNING_PRIVATE_KEY: ""
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Upload Windows bundler diagnostics
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: cc-gateway-windows-bundler-diagnostics
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/wix/**
+            src-tauri/target/${{ matrix.target }}/release/bundle/**
+          if-no-files-found: warn
 
       - name: Package macOS portable ZIP
         if: runner.os == 'macOS'
