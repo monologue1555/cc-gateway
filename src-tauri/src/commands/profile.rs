@@ -180,8 +180,8 @@ pub fn apply_profile(
         let profile_id = id.clone();
         let proxy_service = state.proxy_service.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = proxy_service.stop().await {
-                log::warn!("切换项目后停止代理服务失败: {e}");
+            if let Err(e) = proxy_service.stop_if_unused().await {
+                log::warn!("切换项目后检查共享代理收尾失败: {e}");
             }
             if let Some(app_state) = app_handle.try_state::<AppState>() {
                 emit_profile_apply_events(&app_handle, app_state.inner(), &profile_id, scope);

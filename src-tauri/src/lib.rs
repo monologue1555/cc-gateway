@@ -1,3 +1,4 @@
+mod agent_gateway;
 mod app_config;
 mod app_store;
 mod auto_launch;
@@ -1378,6 +1379,10 @@ pub fn run() {
             commands::get_proxy_status,
             commands::get_proxy_config,
             commands::update_proxy_config,
+            commands::get_agent_gateway_state,
+            commands::update_agent_gateway_config,
+            commands::regenerate_agent_gateway_token,
+            commands::test_agent_gateway_protocol,
             // Global & Per-App Config
             commands::get_global_proxy_config,
             commands::update_global_proxy_config,
@@ -1767,16 +1772,42 @@ async fn enabled_proxy_apps_on_startup(db: &database::Database) -> Vec<&'static 
     apps
 }
 
+fn agent_gateway_enabled_on_startup(db: &database::Database) -> bool {
+    crate::agent_gateway::load_agent_gateway_config(db).is_ok_and(|config| config.enabled)
+}
+
 async fn restore_proxy_state_on_startup(state: &store::AppState) {
     // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
     let apps_to_restore = enabled_proxy_apps_on_startup(&state.db).await;
+    let restore_agent_gateway = agent_gateway_enabled_on_startup(&state.db);
 
-    if apps_to_restore.is_empty() {
+    if apps_to_restore.is_empty() && !restore_agent_gateway {
         log::debug!("启动时无需恢复代理状态");
         return;
     }
 
-    log::info!("检测到上次代理状态需要恢复，应用列表: {apps_to_restore:?}");
+    log::info!(
+        "检测到上次代理状态需要恢复，应用列表: {apps_to_restore:?}, Agent Gateway: {restore_agent_gateway}"
+    );
+
+    // Agent Gateway 只需要共享 HTTP listener，不接管任何应用的 Live 配置。
+    // 必须独立恢复，否则“仅启用 Agent Gateway”的用户重启后会留下 enabled
+    // 配置却没有监听端口。
+    if restore_agent_gateway {
+        match state.proxy_service.get_config().await {
+            Ok(config) if crate::agent_gateway::listen_address_is_safe(&config.listen_address) => {
+                match state.proxy_service.start().await {
+                    Ok(server) => log::info!("✓ 已恢复 Agent Gateway，端口: {}", server.port),
+                    Err(error) => log::error!("✗ 恢复 Agent Gateway 失败: {error}"),
+                }
+            }
+            Ok(config) => log::error!(
+                "✗ 未恢复 Agent Gateway：共享代理监听地址 {} 不是 127.0.0.1",
+                config.listen_address
+            ),
+            Err(error) => log::error!("✗ 读取 Agent Gateway 监听配置失败: {error}"),
+        }
+    }
 
     // 逐个恢复接管状态
     for app_type in apps_to_restore {
@@ -2087,7 +2118,10 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_exit_request, enabled_proxy_apps_on_startup, ExitRequestAction};
+    use super::{
+        agent_gateway_enabled_on_startup, classify_exit_request, enabled_proxy_apps_on_startup,
+        ExitRequestAction,
+    };
     use crate::database::Database;
 
     #[test]
@@ -2130,5 +2164,17 @@ mod tests {
         let apps = enabled_proxy_apps_on_startup(&db).await;
 
         assert_eq!(apps, vec!["grokbuild"]);
+    }
+
+    #[test]
+    fn startup_restore_detects_agent_gateway_without_app_takeover() {
+        let db = Database::memory().expect("initialize database");
+        db.set_setting(
+            crate::agent_gateway::AGENT_GATEWAY_CONFIG_KEY,
+            r#"{"enabled":true,"token":"ccs-agent-test"}"#,
+        )
+        .expect("persist Agent Gateway state");
+
+        assert!(agent_gateway_enabled_on_startup(&db));
     }
 }

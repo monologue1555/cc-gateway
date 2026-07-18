@@ -2951,6 +2951,74 @@
     "suggestedDefaults": "应用建议默认配置",
     "suggestedDefaultsHint": "使用此预设推荐的默认模型配置"
   },
+  "agentGateway": {
+    "title": "Agent Gateway",
+    "description": "让其他 Agent 通过本地端点复用 Claude Desktop 的 Anthropic Messages（原生）路由",
+    "service": "Gateway 服务",
+    "running": "Agent 入口已启用",
+    "stopped": "Agent 入口已停用",
+    "localEndpoint": "固定本地监听",
+    "loadFailed": "无法读取 Agent Gateway 配置：{{error}}",
+    "protocol": {
+      "chat": "Chat Completions"
+    },
+    "compatibility": {
+      "compatible": "当前 Claude Desktop 路由兼容",
+      "incompatible": "当前 Claude Desktop 路由不兼容",
+      "supported": "Agent Gateway 会直接复用这条原生 Anthropic 路由。",
+      "unsupported": "MVP 仅支持 API 格式为 Anthropic Messages（原生）的 Claude Desktop 供应商。",
+      "enableBlocked": "请先切换到 Anthropic Messages（原生）供应商"
+    },
+    "token": {
+      "title": "Gateway Key",
+      "description": "其他 Agent 只使用这个本地密钥，上游供应商密钥不会暴露。",
+      "regenerate": "重新生成",
+      "copyUnavailable": "为安全起见，只能复制本次新生成的密钥",
+      "oneTimeHint": "明文密钥只在重新生成后于本次页面会话中可复制；重新生成会使旧密钥立即失效。",
+      "confirmTitle": "重新生成 Gateway Key？",
+      "confirmMessage": "旧密钥会立即失效，已连接的其他 Agent 必须更新配置。新密钥只显示一次并会自动复制。",
+      "confirmAction": "生成并复制"
+    },
+    "providers": {
+      "title": "跟随 Claude Desktop 的 Anthropic 原生路由",
+      "description": "Gateway 不维护第二套路由配置；MVP 仅跟随 Anthropic Messages（原生）供应商，不支持 Desktop 的 OpenAI Chat、OpenAI Responses 或 Gemini Native 格式。",
+      "current": "Claude Desktop 当前供应商",
+      "readOnly": "自动跟随",
+      "routePolicy": "路由策略",
+      "failover": "由 Claude Desktop 路由统一决定，Agent Gateway 不单独修改。",
+      "failoverOn": "跟随自动切换",
+      "failoverOff": "跟随当前供应商",
+      "emulateClaudeCode": "补齐 Claude Code 客户端指纹",
+      "emulateClaudeCodeHint": "所有请求都会沿用 Claude Desktop 本地路由；开启后额外补齐 Claude Code 的 User-Agent、x-app 与系统提示，仅在中转站要求时启用。",
+      "empty": "Claude Desktop 当前没有可用的本地路由，请先在 Claude 页启用一个供应商。"
+    },
+    "models": {
+      "title": "可用模型",
+      "description": "模型目录、别名与角色回落沿用当前兼容的 Claude Desktop Anthropic 原生路由。",
+      "count": "个",
+      "details": "查看模型 ID 与上游映射",
+      "empty": "当前路由没有可暴露的模型。请先配置供应商模型映射。"
+    },
+    "clients": {
+      "title": "Agent 接入",
+      "description": "Anthropic、Responses 与 Chat 请求会在本地统一接入当前 Anthropic 原生路由；测试会通过 Gateway 调用当前模型。",
+      "testModel": "示例与测试模型",
+      "selectModel": "选择模型",
+      "test": "测试"
+    },
+    "toast": {
+      "saveFailed": "Agent Gateway 配置保存失败：{{error}}",
+      "tokenRegenerated": "新 Gateway Key 已生成并复制，请立即更新其他 Agent",
+      "tokenFailed": "Gateway Key 生成失败：{{error}}",
+      "tokenCopied": "Gateway Key 已复制",
+      "copyFailed": "复制失败：{{error}}",
+      "testPassed": "{{protocol}} 测试通过（{{latency}} ms）",
+      "testFailed": "协议测试失败",
+      "testFailedDetail": "协议测试失败：{{error}}",
+      "endpointCopied": "端点已复制",
+      "snippetCopied": "配置片段已复制"
+    }
+  },
   "subscription": {
     "title": "订阅额度",
     "fiveHour": "5小时",

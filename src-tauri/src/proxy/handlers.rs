@@ -21,6 +21,7 @@ use super::{
         codex_chat_history::record_responses_sse_stream,
         get_adapter, get_claude_api_format,
         streaming::create_anthropic_sse_stream,
+        streaming_agent_chat_anthropic::create_chat_completions_sse_stream,
         streaming_codex_anthropic::{
             create_responses_sse_stream_from_anthropic_with_context,
             responses_sse_events_from_anthropic_message,
@@ -28,8 +29,8 @@ use super::{
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_responses::create_anthropic_sse_stream_from_responses,
-        transform, transform_codex_anthropic, transform_codex_chat, transform_gemini,
-        transform_responses,
+        transform, transform_agent_chat_anthropic, transform_codex_anthropic, transform_codex_chat,
+        transform_gemini, transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, process_response, read_decoded_body,
@@ -68,6 +69,56 @@ pub async fn health_check() -> (StatusCode, Json<Value>) {
 pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxyStatus>, ProxyError> {
     let status = state.status.read().await.clone();
     Ok(Json(status))
+}
+
+pub async fn handle_agent_health(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<Json<Value>, ProxyError> {
+    let peer = request
+        .extensions()
+        .get::<std::net::SocketAddr>()
+        .ok_or_else(|| ProxyError::AuthError("Agent Gateway 无法确认客户端地址".to_string()))?;
+    if !peer.ip().is_loopback() {
+        return Err(ProxyError::AuthError(
+            "Agent Gateway 仅允许 localhost 客户端".to_string(),
+        ));
+    }
+    let config = crate::agent_gateway::load_agent_gateway_config(state.db.as_ref())
+        .map_err(|error| ProxyError::DatabaseError(error.to_string()))?;
+    Ok(Json(json!({
+        "status": if config.enabled { "healthy" } else { "disabled" },
+        "enabled": config.enabled,
+        "scope": "localhost",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })))
+}
+
+pub async fn handle_agent_models(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<Json<Value>, ProxyError> {
+    validate_agent_gateway_request(&state, request.headers(), request.extensions())?;
+    let providers = state
+        .provider_router
+        .select_providers("claude-desktop")
+        .await
+        .map_err(|error| ProxyError::DatabaseError(error.to_string()))?;
+    crate::agent_gateway::ensure_provider_chain_compatible(&providers)
+        .map_err(ProxyError::ConfigError)?;
+    let provider = providers.first().ok_or(ProxyError::NoAvailableProvider)?;
+    let data = crate::agent_gateway::model_catalog(&provider)
+        .into_iter()
+        .map(|model| {
+            json!({
+                "id": model.id,
+                "object": "model",
+                "owned_by": "cc-switch",
+                "supports1m": model.supports_1m,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "object": "list", "data": data })))
 }
 
 /// GET /v1/models — Codex model list (reachability check)
@@ -278,6 +329,210 @@ fn validate_claude_desktop_gateway_auth(
         ));
     }
     Ok(())
+}
+
+const AGENT_GATEWAY_TAG: &str = "Agent Gateway";
+const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
+
+fn validate_agent_gateway_request(
+    state: &ProxyState,
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> Result<crate::agent_gateway::AgentGatewayConfig, ProxyError> {
+    let peer = extensions
+        .get::<std::net::SocketAddr>()
+        .ok_or_else(|| ProxyError::AuthError("Agent Gateway 无法确认客户端地址".to_string()))?;
+    if !peer.ip().is_loopback() {
+        return Err(ProxyError::AuthError(
+            "Agent Gateway 仅允许 localhost 客户端".to_string(),
+        ));
+    }
+
+    let config = crate::agent_gateway::load_agent_gateway_config(state.db.as_ref())
+        .map_err(|error| ProxyError::DatabaseError(error.to_string()))?;
+    if !config.enabled {
+        return Err(ProxyError::NotRunning);
+    }
+
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let (scheme, token) = value.trim().split_once(' ')?;
+            scheme
+                .eq_ignore_ascii_case("bearer")
+                .then_some(token.trim())
+        });
+    let x_api_key = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    let valid = bearer
+        .into_iter()
+        .chain(x_api_key)
+        .any(|candidate| crate::agent_gateway::token_matches(&config, candidate));
+    if !valid {
+        return Err(ProxyError::AuthError(
+            "Agent Gateway Key 缺失或无效".to_string(),
+        ));
+    }
+    Ok(config)
+}
+
+/// Keep the Agent Gateway authentication boundary separate from the selected
+/// third-party provider. Only protocol negotiation headers are eligible to
+/// leave localhost; local credentials, cookies and arbitrary identity headers
+/// are deliberately dropped before the shared forwarder sees the request.
+fn sanitize_agent_gateway_headers(headers: &axum::http::HeaderMap) -> axum::http::HeaderMap {
+    const ALLOWED: [&str; 5] = [
+        "accept",
+        "accept-encoding",
+        "content-type",
+        "anthropic-version",
+        "anthropic-beta",
+    ];
+
+    let mut sanitized = axum::http::HeaderMap::new();
+    for name in ALLOWED {
+        for value in headers.get_all(name).iter() {
+            sanitized.append(axum::http::HeaderName::from_static(name), value.clone());
+        }
+    }
+    sanitized
+}
+
+/// OpenAI-compatible clients commonly send `Accept: text/event-stream`, while
+/// native Anthropic gateways negotiate streaming from `stream: true` in the
+/// JSON body and may reject that Accept value. Match the proven Codex→Anthropic
+/// route before forwarding converted Chat/Responses requests.
+fn normalize_agent_anthropic_accept(headers: &mut axum::http::HeaderMap) {
+    headers.insert(
+        axum::http::header::ACCEPT,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+}
+
+/// The MVP deliberately follows the upstream's native Anthropic streaming
+/// contract instead of adding a second buffering/stream-synthesis layer. A
+/// mismatched response must be an explicit error, never an empty fake success
+/// or a response with semantics different from the client's request.
+fn ensure_agent_chat_stream_contract(
+    requested_stream: bool,
+    upstream_is_sse: bool,
+) -> Result<(), ProxyError> {
+    if requested_stream == upstream_is_sse {
+        Ok(())
+    } else {
+        Err(ProxyError::TransformError(format!(
+            "Agent Gateway 要求 Anthropic 上游遵守 stream 模式；请求 stream={requested_stream}，但上游返回 {}。",
+            if upstream_is_sse { "SSE" } else { "JSON" }
+        )))
+    }
+}
+
+fn requests_one_m_context(model: &str) -> bool {
+    let marker = crate::claude_desktop_config::ONE_M_CONTEXT_MARKER.as_bytes();
+    let value = model.trim().as_bytes();
+    value.len() >= marker.len() && value[value.len() - marker.len()..].eq_ignore_ascii_case(marker)
+}
+
+fn add_one_m_beta_header(
+    headers: &mut axum::http::HeaderMap,
+    requested_model: &str,
+) -> Result<(), ProxyError> {
+    if !requests_one_m_context(requested_model) {
+        return Ok(());
+    }
+    let current = headers
+        .get("anthropic-beta")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if current
+        .split(',')
+        .map(str::trim)
+        .any(|value| value == CONTEXT_1M_BETA)
+    {
+        return Ok(());
+    }
+    let combined = if current.trim().is_empty() {
+        CONTEXT_1M_BETA.to_string()
+    } else {
+        format!("{current},{CONTEXT_1M_BETA}")
+    };
+    let value = axum::http::HeaderValue::from_str(&combined)
+        .map_err(|error| ProxyError::InvalidRequest(error.to_string()))?;
+    headers.insert("anthropic-beta", value);
+    Ok(())
+}
+
+/// Anthropic Messages interface exposed to local generic agents.
+pub async fn handle_agent_messages(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    let config = validate_agent_gateway_request(&state, request.headers(), request.extensions())?;
+    let (parts, body) = request.into_parts();
+    let body_bytes = body
+        .collect()
+        .await
+        .map_err(|error| ProxyError::Internal(format!("Failed to read request body: {error}")))?
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&body_bytes)
+        .map_err(|error| ProxyError::InvalidRequest(error.to_string()))?;
+    let requested_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProxyError::InvalidRequest("请求缺少 model".to_string()))?;
+    let mut headers = sanitize_agent_gateway_headers(&parts.headers);
+    add_one_m_beta_header(&mut headers, requested_model)?;
+    let mut ctx = RequestContext::new(
+        &state,
+        &body,
+        &headers,
+        AppType::ClaudeDesktop,
+        AGENT_GATEWAY_TAG,
+        "claude-desktop",
+    )
+    .await?;
+    ctx.set_claude_code_impersonation(config.emulate_claude_code);
+    let providers = ctx.get_providers();
+    crate::agent_gateway::ensure_provider_chain_compatible(&providers)
+        .map_err(ProxyError::ConfigError)?;
+    let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let endpoint = endpoint_with_query(&parts.uri, "/v1/messages");
+    let forwarder = ctx.create_forwarder(&state);
+    let mut result = match forwarder
+        .forward_with_retry(
+            &AppType::ClaudeDesktop,
+            parts.method,
+            &endpoint,
+            body,
+            headers,
+            parts.extensions,
+            providers,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(mut error) => {
+            if let Some(provider) = error.provider.take() {
+                ctx.provider = provider;
+            }
+            log_forward_error(&state, &ctx, is_stream, &error.error);
+            return Err(error.error);
+        }
+    };
+    let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
+    ctx.provider = result.provider;
+    process_response(
+        result.response,
+        &ctx,
+        &state,
+        &CLAUDE_PARSER_CONFIG,
+        connection_guard,
+    )
+    .await
 }
 
 /// Claude 格式转换处理（独有逻辑）
@@ -689,6 +944,205 @@ fn decode_codex_request_body(
 // ============================================================================
 
 /// 处理 /v1/chat/completions 请求（OpenAI Chat Completions API - Codex CLI）
+pub async fn handle_agent_chat_completions(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    let config = validate_agent_gateway_request(&state, request.headers(), request.extensions())?;
+    let (parts, request_body) = request.into_parts();
+    let mut headers = parts.headers;
+    let body_bytes = request_body
+        .collect()
+        .await
+        .map_err(|error| ProxyError::Internal(format!("Failed to read request body: {error}")))?
+        .to_bytes();
+    let body_bytes = decode_codex_request_body(&mut headers, body_bytes)?;
+    let mut headers = sanitize_agent_gateway_headers(&headers);
+    normalize_agent_anthropic_accept(&mut headers);
+    let chat_body: Value = serde_json::from_slice(&body_bytes)
+        .map_err(|error| ProxyError::InvalidRequest(error.to_string()))?;
+    let requested_model = chat_body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProxyError::InvalidRequest("请求缺少 model".to_string()))?;
+    add_one_m_beta_header(&mut headers, requested_model)?;
+
+    let is_stream = chat_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let include_usage = chat_body
+        .pointer("/stream_options/include_usage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut ctx = RequestContext::new(
+        &state,
+        &chat_body,
+        &headers,
+        AppType::ClaudeDesktop,
+        AGENT_GATEWAY_TAG,
+        "claude-desktop",
+    )
+    .await?;
+    ctx.set_claude_code_impersonation(config.emulate_claude_code);
+    let providers = ctx.get_providers();
+    crate::agent_gateway::ensure_provider_chain_compatible(&providers)
+        .map_err(ProxyError::ConfigError)?;
+    let default_max_tokens = ctx
+        .provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.max_output_tokens)
+        .filter(|value| *value > 0)
+        .unwrap_or(8192);
+    let anthropic_body = transform_agent_chat_anthropic::chat_completions_request_to_anthropic(
+        chat_body.clone(),
+        default_max_tokens,
+    )?;
+    let endpoint = endpoint_with_query(&parts.uri, "/v1/messages");
+    let forwarder = ctx.create_forwarder(&state);
+    let mut result = match forwarder
+        .forward_with_retry(
+            &AppType::ClaudeDesktop,
+            parts.method,
+            &endpoint,
+            anthropic_body,
+            headers,
+            parts.extensions,
+            providers,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(mut error) => {
+            if let Some(provider) = error.provider.take() {
+                ctx.provider = provider;
+            }
+            log_forward_error(&state, &ctx, is_stream, &error.error);
+            return Err(error.error);
+        }
+    };
+    let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
+    ctx.provider = result.provider;
+    let response = result.response;
+    let status = response.status();
+    if !status.is_success() {
+        return process_response(
+            response,
+            &ctx,
+            &state,
+            &CLAUDE_PARSER_CONFIG,
+            connection_guard,
+        )
+        .await;
+    }
+
+    let upstream_is_sse = response.is_sse();
+    ensure_agent_chat_stream_contract(is_stream, upstream_is_sse)?;
+
+    if upstream_is_sse {
+        let stream = create_chat_completions_sse_stream(response.bytes_stream(), include_usage);
+        let usage_collector = if usage_logging_enabled(&state) && include_usage {
+            let state = state.clone();
+            let provider_id = ctx.provider.id.clone();
+            let request_model = ctx.request_model.clone();
+            let outbound_model = ctx
+                .outbound_model
+                .clone()
+                .unwrap_or_else(|| request_model.clone());
+            let session_id = ctx.session_id.clone();
+            let started = ctx.start_time;
+            Some(SseUsageCollector::new(
+                started,
+                None,
+                move |events, first_token_ms| {
+                    let Some(usage) = TokenUsage::from_openai_stream_events(&events) else {
+                        return;
+                    };
+                    let model = usage
+                        .model
+                        .clone()
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| outbound_model.clone());
+                    let state = state.clone();
+                    let provider_id = provider_id.clone();
+                    let request_model = request_model.clone();
+                    let outbound_model = outbound_model.clone();
+                    let session_id = session_id.clone();
+                    tokio::spawn(async move {
+                        log_usage(
+                            &state,
+                            &provider_id,
+                            "claude-desktop",
+                            &model,
+                            &request_model,
+                            &outbound_model,
+                            usage,
+                            started.elapsed().as_millis() as u64,
+                            first_token_ms,
+                            true,
+                            status.as_u16(),
+                            Some(session_id),
+                        )
+                        .await;
+                    });
+                },
+            ))
+        } else {
+            None
+        };
+        let logged = create_logged_passthrough_stream(
+            stream,
+            AGENT_GATEWAY_TAG,
+            usage_collector,
+            ctx.streaming_timeout_config(),
+            connection_guard,
+        );
+        let mut response_headers = axum::http::HeaderMap::new();
+        response_headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        response_headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        return Ok((response_headers, axum::body::Body::from_stream(logged)).into_response());
+    }
+
+    let body_timeout =
+        if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
+            std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
+        } else {
+            std::time::Duration::ZERO
+        };
+    let (mut response_headers, _, response_body) =
+        read_decoded_body(response, ctx.tag, body_timeout).await?;
+    let anthropic_response: Value = serde_json::from_slice(&response_body).map_err(|error| {
+        ProxyError::TransformError(format!("Failed to parse Anthropic response: {error}"))
+    })?;
+    spawn_claude_usage_log(&state, &ctx, &anthropic_response, status.as_u16(), false);
+    let chat_response =
+        transform_agent_chat_anthropic::anthropic_response_to_chat_completion(anthropic_response)?;
+    strip_entity_headers_for_rebuilt_body(&mut response_headers);
+    strip_hop_by_hop_response_headers(&mut response_headers);
+    response_headers.remove(axum::http::header::CONTENT_TYPE);
+    let mut builder = axum::response::Response::builder().status(status);
+    for (name, value) in response_headers.iter() {
+        builder = builder.header(name, value);
+    }
+    builder = builder.header(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let response_body = serde_json::to_vec(&chat_response)
+        .map_err(|error| ProxyError::TransformError(error.to_string()))?;
+    builder
+        .body(axum::body::Body::from(response_body))
+        .map_err(|error| ProxyError::Internal(error.to_string()))
+}
+
 pub async fn handle_chat_completions(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -755,6 +1209,117 @@ pub async fn handle_chat_completions(
 }
 
 /// 处理 /v1/responses 请求（OpenAI Responses API - Codex CLI 透传）
+pub async fn handle_agent_responses(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    handle_agent_responses_inner(state, request).await
+}
+
+pub async fn handle_agent_responses_compact(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    validate_agent_gateway_request(&state, request.headers(), request.extensions())?;
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({
+            "error": {
+                "type": "not_implemented_error",
+                "code": "agent_gateway_compaction_unsupported",
+                "message": "Agent Gateway cannot produce OpenAI encrypted compaction items; use the client/agent's local compaction instead."
+            }
+        })),
+    )
+        .into_response())
+}
+
+async fn handle_agent_responses_inner(
+    state: ProxyState,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    let config = validate_agent_gateway_request(&state, request.headers(), request.extensions())?;
+    let (parts, request_body) = request.into_parts();
+    let mut headers = parts.headers;
+    let body_bytes = request_body
+        .collect()
+        .await
+        .map_err(|error| ProxyError::Internal(format!("Failed to read request body: {error}")))?
+        .to_bytes();
+    let body_bytes = decode_codex_request_body(&mut headers, body_bytes)?;
+    let mut headers = sanitize_agent_gateway_headers(&headers);
+    normalize_agent_anthropic_accept(&mut headers);
+    let body: Value = serde_json::from_slice(&body_bytes)
+        .map_err(|error| ProxyError::InvalidRequest(error.to_string()))?;
+    let requested_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProxyError::InvalidRequest("请求缺少 model".to_string()))?;
+    add_one_m_beta_header(&mut headers, requested_model)?;
+    let mut ctx = RequestContext::new(
+        &state,
+        &body,
+        &headers,
+        AppType::ClaudeDesktop,
+        AGENT_GATEWAY_TAG,
+        "claude-desktop",
+    )
+    .await?;
+    ctx.set_claude_code_impersonation(config.emulate_claude_code);
+    let providers = ctx.get_providers();
+    crate::agent_gateway::ensure_provider_chain_compatible(&providers)
+        .map_err(ProxyError::ConfigError)?;
+    let default_max_tokens = ctx
+        .provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.max_output_tokens)
+        .filter(|value| *value > 0)
+        .unwrap_or(8192);
+    let anthropic_body = transform_codex_anthropic::responses_request_to_anthropic(
+        body.clone(),
+        default_max_tokens,
+    )?;
+    let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
+    let client_endpoint = "/responses";
+    let endpoint = endpoint_with_query(&parts.uri, "/v1/messages");
+    let forwarder = ctx.create_forwarder(&state);
+    let mut result = match forwarder
+        .forward_with_retry(
+            &AppType::ClaudeDesktop,
+            parts.method,
+            &endpoint,
+            anthropic_body,
+            headers,
+            parts.extensions,
+            providers,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(mut error) => {
+            if let Some(provider) = error.provider.take() {
+                ctx.provider = provider;
+            }
+            log_forward_error(&state, &ctx, is_stream, &error.error);
+            return build_codex_proxy_error_response(&ctx, client_endpoint, &error.error);
+        }
+    };
+    let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
+    ctx.provider = result.provider;
+    handle_codex_anthropic_to_responses_transform(
+        result.response,
+        &ctx,
+        &state,
+        is_stream,
+        connection_guard,
+        tool_context,
+    )
+    .await
+}
+
 pub async fn handle_responses(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -2438,10 +3003,59 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, body_snippet, chat_sse_to_response_value, codex_proxy_error_json,
-        responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        ensure_agent_chat_stream_contract, normalize_agent_anthropic_accept,
+        responses_sse_to_response_value, sanitize_agent_gateway_headers,
+        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
+
+    #[test]
+    fn agent_gateway_headers_only_keep_protocol_negotiation() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer local-key".parse().unwrap());
+        headers.insert("x-api-key", "local-key".parse().unwrap());
+        headers.insert("api-key", "local-key".parse().unwrap());
+        headers.insert("cookie", "session=secret".parse().unwrap());
+        headers.insert("proxy-authorization", "Basic secret".parse().unwrap());
+        headers.insert("x-local-identity", "private".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("accept", "text/event-stream".parse().unwrap());
+        headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+
+        let sanitized = sanitize_agent_gateway_headers(&headers);
+
+        assert_eq!(sanitized["content-type"], "application/json");
+        assert_eq!(sanitized["accept"], "text/event-stream");
+        assert_eq!(sanitized["anthropic-version"], "2023-06-01");
+        for private in [
+            "authorization",
+            "x-api-key",
+            "api-key",
+            "cookie",
+            "proxy-authorization",
+            "x-local-identity",
+        ] {
+            assert!(sanitized.get(private).is_none(), "leaked {private}");
+        }
+    }
+
+    #[test]
+    fn agent_chat_rejects_upstream_stream_mode_mismatches() {
+        assert!(ensure_agent_chat_stream_contract(false, false).is_ok());
+        assert!(ensure_agent_chat_stream_contract(true, true).is_ok());
+        assert!(ensure_agent_chat_stream_contract(true, false).is_err());
+        assert!(ensure_agent_chat_stream_contract(false, true).is_err());
+    }
+
+    #[test]
+    fn converted_agent_protocols_use_anthropic_accept_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("accept", "text/event-stream".parse().unwrap());
+
+        normalize_agent_anthropic_accept(&mut headers);
+
+        assert_eq!(headers["accept"], "application/json");
+    }
 
     #[test]
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {

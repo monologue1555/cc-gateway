@@ -2951,6 +2951,74 @@
     "suggestedDefaults": "Apply Suggested Defaults",
     "suggestedDefaultsHint": "Use this preset's recommended default model configuration"
   },
+  "agentGateway": {
+    "title": "Agent Gateway",
+    "description": "Let other agents reuse Claude Desktop's native Anthropic Messages route through a local endpoint",
+    "service": "Gateway service",
+    "running": "Agent endpoint enabled",
+    "stopped": "Agent endpoint disabled",
+    "localEndpoint": "Fixed local listener",
+    "loadFailed": "Unable to load Agent Gateway settings: {{error}}",
+    "protocol": {
+      "chat": "Chat Completions"
+    },
+    "compatibility": {
+      "compatible": "The current Claude Desktop route is compatible",
+      "incompatible": "The current Claude Desktop route is incompatible",
+      "supported": "Agent Gateway will directly reuse this native Anthropic route.",
+      "unsupported": "The MVP only supports Claude Desktop providers using the native Anthropic Messages API format.",
+      "enableBlocked": "Switch to a native Anthropic Messages provider first"
+    },
+    "token": {
+      "title": "Gateway Key",
+      "description": "Other agents use this local key; upstream provider keys are never exposed.",
+      "regenerate": "Regenerate",
+      "copyUnavailable": "For security, only a key generated in this session can be copied",
+      "oneTimeHint": "The plaintext key can only be copied in this page session after regeneration. Regenerating immediately revokes the old key.",
+      "confirmTitle": "Regenerate the Gateway Key?",
+      "confirmMessage": "The old key will stop working immediately and connected agents must be updated. The new key is shown once and copied automatically.",
+      "confirmAction": "Generate and copy"
+    },
+    "providers": {
+      "title": "Follow Claude Desktop's native Anthropic route",
+      "description": "The Gateway does not maintain a second routing configuration. The MVP only follows native Anthropic Messages providers; Claude Desktop's OpenAI Chat, OpenAI Responses, and Gemini Native formats are not supported.",
+      "current": "Current Claude Desktop provider",
+      "readOnly": "Follows automatically",
+      "routePolicy": "Routing policy",
+      "failover": "Controlled by the Claude Desktop route; Agent Gateway does not modify it separately.",
+      "failoverOn": "Follow automatic switching",
+      "failoverOff": "Follow current provider",
+      "emulateClaudeCode": "Add the Claude Code client fingerprint",
+      "emulateClaudeCodeHint": "All requests use the Claude Desktop local route. Enable this to additionally inject Claude Code's User-Agent, x-app, and system prompt when a relay requires them.",
+      "empty": "Claude Desktop has no active local route. Enable a provider on the Claude page first."
+    },
+    "models": {
+      "title": "Available models",
+      "description": "The model catalog, aliases, and role fallbacks follow the current compatible native Anthropic route in Claude Desktop.",
+      "count": "models",
+      "details": "Show model IDs and upstream mappings",
+      "empty": "This route exposes no models. Configure provider model mappings first."
+    },
+    "clients": {
+      "title": "Connect an agent",
+      "description": "Anthropic, Responses, and Chat requests enter the current native Anthropic route locally. Tests call the selected model through the Gateway.",
+      "testModel": "Example and test model",
+      "selectModel": "Select a model",
+      "test": "Test"
+    },
+    "toast": {
+      "saveFailed": "Unable to save Agent Gateway settings: {{error}}",
+      "tokenRegenerated": "A new Gateway Key was generated and copied. Update connected agents now.",
+      "tokenFailed": "Unable to generate a Gateway Key: {{error}}",
+      "tokenCopied": "Gateway Key copied",
+      "copyFailed": "Copy failed: {{error}}",
+      "testPassed": "{{protocol}} test passed ({{latency}} ms)",
+      "testFailed": "Protocol test failed",
+      "testFailedDetail": "Protocol test failed: {{error}}",
+      "endpointCopied": "Endpoint copied",
+      "snippetCopied": "Configuration snippet copied"
+    }
+  },
   "subscription": {
     "title": "Subscription Quota",
     "fiveHour": "5-Hour",

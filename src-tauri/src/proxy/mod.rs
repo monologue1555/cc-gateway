@@ -36,6 +36,9 @@ pub mod thinking_rectifier;
 pub(crate) mod types;
 pub mod usage;
 
+#[cfg(test)]
+mod agent_gateway_tests;
+
 // 公开导出给外部使用（commands, services等模块需要）
 #[allow(unused_imports)]
 pub use circuit_breaker::{

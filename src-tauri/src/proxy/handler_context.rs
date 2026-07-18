@@ -176,6 +176,22 @@ impl RequestContext {
         })
     }
 
+    /// Apply a request-local Claude Code fingerprint to every provider selected
+    /// by the existing application router. This does not persist or create a
+    /// second provider/routing scope.
+    pub fn set_claude_code_impersonation(&mut self, enabled: bool) {
+        self.provider
+            .meta
+            .get_or_insert_with(Default::default)
+            .impersonate_claude_code = Some(enabled);
+        for provider in &mut self.providers {
+            provider
+                .meta
+                .get_or_insert_with(Default::default)
+                .impersonate_claude_code = Some(enabled);
+        }
+    }
+
     /// 从 URI 提取模型名称（Gemini 专用）
     ///
     /// Gemini API 的模型名称在 URI 中，格式如：

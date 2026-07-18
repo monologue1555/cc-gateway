@@ -324,9 +324,9 @@ impl ProfileService {
     ///
     /// 应用指定项目的快照到当前分组内的所有应用。
     ///
-    /// 返回 `(warnings, should_stop_proxy)`：当当前分组内所有接管都被关闭、且
-    /// 其它应用也没有接管时，建议调用者停止代理服务，以便 Claude Desktop 的
-    /// "本地路由"总开关同步显示为关闭。
+    /// 返回 `(warnings, should_stop_proxy)`：当当前分组内所有接管都被关闭、
+    /// 其它应用也没有接管、且 Agent Gateway 未启用时，建议调用者停止代理
+    /// 服务，以便 Claude Desktop 的"本地路由"总开关同步显示为关闭。
     pub fn apply(
         state: &AppState,
         profile_id: &str,
@@ -458,8 +458,17 @@ impl ProfileService {
             .db
             .set_current_profile_id(scope.as_str(), Some(profile_id))?;
 
-        // 当前分组内所有接管已关闭；若其它应用也无接管，可停止代理服务。
-        let should_stop_proxy = !state.db.is_live_takeover_active_sync();
+        // 当前分组内所有接管已关闭；只有其它应用也无接管、且 Agent Gateway
+        // 未启用时才可停止共享代理。异步收尾还会在服务锁内重新检查一次。
+        let should_stop_proxy = state
+            .proxy_service
+            .should_stop_shared_proxy_now()
+            .unwrap_or_else(|error| {
+                warnings.push(format!(
+                    "shared proxy consumer check failed; skipped stopping it: {error}"
+                ));
+                false
+            });
 
         Ok((warnings, should_stop_proxy))
     }

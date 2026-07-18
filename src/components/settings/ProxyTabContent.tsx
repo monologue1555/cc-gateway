@@ -1,5 +1,12 @@
 import { useState } from "react";
-import { Server, Activity, Zap, Globe, ShieldAlert } from "lucide-react";
+import {
+  Server,
+  Activity,
+  Zap,
+  Globe,
+  ShieldAlert,
+  Waypoints,
+} from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import {
@@ -15,6 +22,7 @@ import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPa
 import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
+import { AgentGatewayPanel } from "@/components/settings/AgentGatewayPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ToggleRow } from "@/components/ui/toggle-row";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
@@ -90,6 +98,35 @@ export function ProxyTabContent({
       className="space-y-4"
     >
       <Accordion type="multiple" defaultValue={[]} className="w-full space-y-4">
+        {/* Agent Gateway */}
+        <AccordionItem
+          value="agentGateway"
+          className="rounded-xl glass-card overflow-hidden"
+        >
+          <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+            <div className="flex w-full items-center gap-3">
+              <Waypoints className="h-5 w-5 text-cyan-500" />
+              <div className="text-left">
+                <h3 className="text-base font-semibold">
+                  {t("agentGateway.title", { defaultValue: "Agent Gateway" })}
+                </h3>
+                <p className="text-sm text-muted-foreground font-normal">
+                  {t("agentGateway.description", {
+                    defaultValue:
+                      "让其他 Agent 复用 Claude Desktop 的 Anthropic Messages 原生路由",
+                  })}
+                </p>
+              </div>
+              <Badge variant="secondary" className="ml-auto mr-2 h-6">
+                Anthropic · Responses · Chat
+              </Badge>
+            </div>
+          </AccordionTrigger>
+          <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+            <AgentGatewayPanel />
+          </AccordionContent>
+        </AccordionItem>
+
         {/* Local Proxy */}
         <AccordionItem
           value="proxy"

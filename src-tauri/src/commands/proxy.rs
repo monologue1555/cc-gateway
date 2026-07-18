@@ -6,6 +6,21 @@ use crate::error::AppError;
 use crate::proxy::types::*;
 use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
+
+fn ensure_agent_gateway_listener_compatible(
+    state: &AppState,
+    listen_address: &str,
+) -> Result<(), String> {
+    let gateway = crate::agent_gateway::load_agent_gateway_config(state.db.as_ref())
+        .map_err(|error| error.to_string())?;
+    if gateway.enabled && !crate::agent_gateway::listen_address_is_safe(listen_address) {
+        return Err(
+            "Agent Gateway 已启用，出于本地密钥与共享 API 安全考虑，监听地址必须保持 127.0.0.1。请先关闭 Agent Gateway。"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
 use std::str::FromStr;
 
 /// 启动代理服务器（仅启动服务，不接管 Live 配置）
@@ -19,6 +34,11 @@ pub async fn start_proxy_server(
 /// 停止代理服务器（仅停止服务，不恢复/清理 Live 接管状态）
 #[tauri::command]
 pub async fn stop_proxy_server(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let agent_gateway = crate::agent_gateway::load_agent_gateway_config(state.db.as_ref())
+        .map_err(|error| error.to_string())?;
+    if agent_gateway.enabled {
+        return Err("Agent Gateway 仍在使用本地路由，请先在设置中关闭它。".to_string());
+    }
     let takeover = state.proxy_service.get_takeover_status().await?;
     if takeover.claude
         || takeover.codex
@@ -38,6 +58,11 @@ pub async fn stop_proxy_server(state: tauri::State<'_, AppState>) -> Result<(), 
 /// 停止代理服务器（恢复 Live 配置）
 #[tauri::command]
 pub async fn stop_proxy_with_restore(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let agent_gateway = crate::agent_gateway::load_agent_gateway_config(state.db.as_ref())
+        .map_err(|error| error.to_string())?;
+    if agent_gateway.enabled {
+        return Err("Agent Gateway 仍在使用本地路由，请先在设置中关闭它。".to_string());
+    }
     state.proxy_service.stop_with_restore().await
 }
 
@@ -80,6 +105,7 @@ pub async fn update_proxy_config(
     state: tauri::State<'_, AppState>,
     config: ProxyConfig,
 ) -> Result<(), String> {
+    ensure_agent_gateway_listener_compatible(&state, &config.listen_address)?;
     state.proxy_service.update_config(&config).await
 }
 
@@ -106,6 +132,7 @@ pub async fn update_global_proxy_config(
     state: tauri::State<'_, AppState>,
     config: GlobalProxyConfig,
 ) -> Result<(), String> {
+    ensure_agent_gateway_listener_compatible(&state, &config.listen_address)?;
     let db = &state.db;
     db.update_global_proxy_config(config)
         .await

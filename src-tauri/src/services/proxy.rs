@@ -54,6 +54,10 @@ enum ClaudeTakeoverAuthPolicy {
     ManagedAccount { keep_auth_token: bool },
 }
 
+fn should_stop_shared_proxy(any_app_takeover_enabled: bool, agent_gateway_enabled: bool) -> bool {
+    !any_app_takeover_enabled && !agent_gateway_enabled
+}
+
 #[derive(Clone)]
 pub struct ProxyService {
     db: Arc<Database>,
@@ -76,6 +80,21 @@ impl ProxyService {
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
         }
+    }
+
+    /// Enforce the Agent Gateway's loopback-only listener invariant at the
+    /// service boundary so every current and future start/update caller shares
+    /// the same safety check.
+    fn ensure_agent_gateway_listener_compatible(&self, listen_address: &str) -> Result<(), String> {
+        let gateway = crate::agent_gateway::load_agent_gateway_config(&self.db)
+            .map_err(|error| error.to_string())?;
+        if gateway.enabled && !crate::agent_gateway::listen_address_is_safe(listen_address) {
+            return Err(
+                "Agent Gateway 已启用，出于本地密钥与共享 API 安全考虑，监听地址必须保持 127.0.0.1。请先关闭 Agent Gateway。"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -507,6 +526,22 @@ impl ProxyService {
         });
     }
 
+    /// 共享代理只可在没有应用接管、且 Agent Gateway 未启用时停止。
+    ///
+    /// Profile 切换是同步路径，因此这里保留同步决策入口；真正停止前仍会在
+    /// [`Self::stop_if_unused`] 内持有服务锁并重新检查，以覆盖异步收尾期间的状态变化。
+    pub(crate) fn should_stop_shared_proxy_now(&self) -> Result<bool, String> {
+        let any_app_takeover_enabled = self.db.is_live_takeover_active_sync();
+        let agent_gateway_enabled = crate::agent_gateway::load_agent_gateway_config(&self.db)
+            .map_err(|error| format!("读取 Agent Gateway 状态失败: {error}"))?
+            .enabled;
+
+        Ok(should_stop_shared_proxy(
+            any_app_takeover_enabled,
+            agent_gateway_enabled,
+        ))
+    }
+
     pub(crate) async fn lock_switch_for_app(
         &self,
         app_type: &str,
@@ -538,9 +573,12 @@ impl ProxyService {
             .await
             .map_err(|e| format!("获取代理配置失败: {e}"))?;
 
+        self.ensure_agent_gateway_listener_compatible(&config.listen_address)?;
+
         // 3. 若已在运行：确保持久化状态（如需要）并返回当前信息
         if let Some(server) = self.server.read().await.as_ref() {
             let status = server.get_status().await;
+            self.ensure_agent_gateway_listener_compatible(&status.address)?;
             return Ok(ProxyServerInfo {
                 address: status.address,
                 port: status.port,
@@ -904,9 +942,8 @@ impl ProxyService {
         if !any_enabled {
             let _ = self.db.set_live_takeover_active(false).await;
 
-            if self.is_running().await {
-                // 此时没有任何 app 处于接管状态，停止服务即可
-                let _ = self.stop().await;
+            if let Err(error) = self.stop_if_unused().await {
+                log::warn!("关闭最后一个应用接管后检查共享代理失败: {error}");
             }
         }
 
@@ -1257,33 +1294,60 @@ impl ProxyService {
         Ok(())
     }
 
+    async fn finish_stop(&self, server: ProxyServer) -> Result<(), String> {
+        server
+            .stop()
+            .await
+            .map_err(|e| format!("停止代理服务器失败: {e}"))?;
+
+        // 停止时设置 proxy_enabled = false
+        let mut global_config = self
+            .db
+            .get_global_proxy_config()
+            .await
+            .map_err(|e| format!("获取全局代理配置失败: {e}"))?;
+
+        if global_config.proxy_enabled {
+            global_config.proxy_enabled = false;
+            if let Err(e) = self.db.update_global_proxy_config(global_config).await {
+                log::warn!("更新代理总开关失败: {e}");
+            }
+        }
+
+        log::info!("代理服务器已停止");
+        Ok(())
+    }
+
     /// 停止代理服务器
     pub async fn stop(&self) -> Result<(), String> {
-        if let Some(server) = self.server.write().await.take() {
-            server
-                .stop()
-                .await
-                .map_err(|e| format!("停止代理服务器失败: {e}"))?;
+        let mut server_guard = self.server.write().await;
+        let server = server_guard
+            .take()
+            .ok_or_else(|| "代理服务器未运行".to_string())?;
+        let result = self.finish_stop(server).await;
+        drop(server_guard);
+        result
+    }
 
-            // 停止时设置 proxy_enabled = false
-            let mut global_config = self
-                .db
-                .get_global_proxy_config()
-                .await
-                .map_err(|e| format!("获取全局代理配置失败: {e}"))?;
-
-            if global_config.proxy_enabled {
-                global_config.proxy_enabled = false;
-                if let Err(e) = self.db.update_global_proxy_config(global_config).await {
-                    log::warn!("更新代理总开关失败: {e}");
-                }
-            }
-
-            log::info!("代理服务器已停止");
-            Ok(())
-        } else {
-            Err("代理服务器未运行".to_string())
+    /// 仅在共享代理没有任何消费者时停止。
+    ///
+    /// 服务锁覆盖最终状态检查和 server.take()，避免 Profile 的异步收尾与
+    /// Agent Gateway 启用并发时留下 `enabled = true`、listener 已停止的状态。
+    pub(crate) async fn stop_if_unused(&self) -> Result<bool, String> {
+        let mut server_guard = self.server.write().await;
+        if !self.should_stop_shared_proxy_now()? {
+            return Ok(false);
         }
+
+        let Some(server) = server_guard.take() else {
+            return Ok(false);
+        };
+
+        // 保持服务写锁直到旧 listener 完全停止；并发 enable/start 会在这里之后
+        // 重新启动，不能在旧 listener 尚未释放端口时误判为“未运行”。
+        self.finish_stop(server).await?;
+        drop(server_guard);
+        Ok(true)
     }
 
     /// 停止代理服务器（恢复 Live 配置，用户手动关闭时使用）
@@ -3031,6 +3095,8 @@ impl ProxyService {
 
     /// 更新代理配置
     pub async fn update_config(&self, config: &ProxyConfig) -> Result<(), String> {
+        self.ensure_agent_gateway_listener_compatible(&config.listen_address)?;
+
         // 记录旧配置用于判定是否需要重启
         let previous = self
             .db
@@ -3185,6 +3251,54 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
+
+    #[test]
+    fn shared_proxy_stays_running_while_agent_gateway_is_a_consumer() {
+        assert!(!should_stop_shared_proxy(false, true));
+        assert!(!should_stop_shared_proxy(true, false));
+        assert!(!should_stop_shared_proxy(true, true));
+        assert!(should_stop_shared_proxy(false, false));
+    }
+
+    #[test]
+    fn shared_proxy_stop_decision_reads_persisted_gateway_state() {
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        assert!(service
+            .should_stop_shared_proxy_now()
+            .expect("read initial consumer state"));
+
+        db.set_setting(
+            crate::agent_gateway::AGENT_GATEWAY_CONFIG_KEY,
+            r#"{"enabled":true,"token":"ccs-agent-test"}"#,
+        )
+        .expect("enable agent gateway");
+
+        assert!(!service
+            .should_stop_shared_proxy_now()
+            .expect("read enabled gateway state"));
+    }
+
+    #[test]
+    fn service_boundary_enforces_agent_gateway_loopback_listener() {
+        let db = Arc::new(Database::memory().expect("init db"));
+        db.set_setting(
+            crate::agent_gateway::AGENT_GATEWAY_CONFIG_KEY,
+            r#"{"enabled":true,"token":"ccs-agent-test"}"#,
+        )
+        .expect("enable agent gateway");
+        let service = ProxyService::new(db);
+
+        assert!(service
+            .ensure_agent_gateway_listener_compatible("127.0.0.1")
+            .is_ok());
+        for unsafe_address in ["0.0.0.0", "127.0.0.2", "::1", "localhost"] {
+            assert!(service
+                .ensure_agent_gateway_listener_compatible(unsafe_address)
+                .is_err());
+        }
+    }
 
     struct TempHome {
         #[allow(dead_code)]

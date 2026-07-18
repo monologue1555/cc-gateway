@@ -1354,6 +1354,14 @@ impl RequestForwarder {
                 .as_ref()
                 .and_then(|meta| meta.impersonate_claude_code)
                 == Some(true);
+        let claude_desktop_impersonate_claude_code = matches!(app_type, AppType::ClaudeDesktop)
+            && provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.impersonate_claude_code)
+                == Some(true);
+        let impersonate_claude_code =
+            codex_impersonate_claude_code || claude_desktop_impersonate_claude_code;
         let (effective_endpoint, passthrough_query) = if codex_responses_to_chat {
             rewrite_codex_responses_endpoint_to_chat(endpoint)
         } else if codex_responses_to_anthropic {
@@ -1485,7 +1493,7 @@ impl RequestForwarder {
                     anthropic_body["model"] = Value::String(stripped.to_string());
                 }
             }
-            if codex_impersonate_claude_code {
+            if impersonate_claude_code {
                 prepend_claude_code_system_prompt(&mut anthropic_body);
             }
             // Enable Anthropic prompt caching (no beta header required). Reuse the
@@ -1517,6 +1525,10 @@ impl RequestForwarder {
         } else {
             mapped_body
         };
+
+        if claude_desktop_impersonate_claude_code {
+            prepend_claude_code_system_prompt(&mut request_body);
+        }
 
         if matches!(app_type, AppType::Codex | AppType::GrokBuild) {
             self.apply_media_prevention(&mut request_body, provider);
@@ -1701,7 +1713,7 @@ impl RequestForwarder {
         };
         // Codex→Anthropic emulation: when there is no custom UA, override Codex's
         // codex_cli_rs UA with the Claude Code UA.
-        let custom_user_agent = if custom_user_agent.is_none() && codex_impersonate_claude_code {
+        let custom_user_agent = if custom_user_agent.is_none() && impersonate_claude_code {
             Some(http::HeaderValue::from_static(CLAUDE_CODE_USER_AGENT))
         } else {
             custom_user_agent
@@ -1791,11 +1803,11 @@ impl RequestForwarder {
             } else {
                 CLAUDE_CODE_BETA.to_string()
             })
-        } else if codex_impersonate_claude_code || codex_anthropic_one_m {
+        } else if impersonate_claude_code || codex_anthropic_one_m {
             // Codex→Anthropic: emulation injects the claude-code marker; a [1m]
             // model injects the context-1m marker.
             let mut betas: Vec<&str> = Vec::new();
-            if codex_impersonate_claude_code {
+            if impersonate_claude_code {
                 betas.push("claude-code-20250219");
             }
             if codex_anthropic_one_m {
@@ -1890,7 +1902,7 @@ impl RequestForwarder {
             }
 
             // --- x-app — during Codex→Anthropic emulation, `cli` is injected uniformly below ---
-            if codex_impersonate_claude_code && key_str.eq_ignore_ascii_case("x-app") {
+            if impersonate_claude_code && key_str.eq_ignore_ascii_case("x-app") {
                 continue;
             }
 
@@ -2007,7 +2019,7 @@ impl RequestForwarder {
         }
 
         // Codex→Anthropic emulation: inject Claude Code's x-app: cli
-        if codex_impersonate_claude_code {
+        if impersonate_claude_code {
             ordered_headers.append("x-app", http::HeaderValue::from_static("cli"));
         }
 

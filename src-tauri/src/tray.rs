@@ -437,8 +437,8 @@ pub fn handle_profile_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool
                     let app_handle2 = app_handle.clone();
                     let proxy_service = app_state.proxy_service.clone();
                     tauri::async_runtime::spawn(async move {
-                        if let Err(e) = proxy_service.stop().await {
-                            log::warn!("托盘切换项目后停止代理服务失败: {e}");
+                        if let Err(e) = proxy_service.stop_if_unused().await {
+                            log::warn!("托盘切换项目后检查共享代理收尾失败: {e}");
                         }
                         if let Some(state) = app_handle2.try_state::<AppState>() {
                             crate::commands::emit_profile_apply_events(

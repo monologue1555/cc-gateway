@@ -143,7 +143,7 @@ impl ProxyServer {
             loop {
                 tokio::select! {
                     result = listener.accept() => {
-                        let (stream, _remote_addr) = match result {
+                        let (stream, remote_addr) = match result {
                             Ok(v) => v,
                             Err(e) => {
                                 log::error!("[{SRV}] accept 失败: {e}", SRV = log_srv::ACCEPT_ERR);
@@ -184,6 +184,10 @@ impl ProxyServer {
 
                                     // Insert our own header case map alongside hyper's internal one
                                     parts.extensions.insert(cases);
+                                    // Agent Gateway handlers use the actual TCP peer address to
+                                    // enforce localhost-only access even when the shared proxy is
+                                    // intentionally listening on a LAN address for other routes.
+                                    parts.extensions.insert(remote_addr);
 
                                     let body = axum::body::Body::new(body);
                                     let axum_req = http::Request::from_parts(parts, body);
@@ -293,6 +297,23 @@ impl ProxyServer {
             // 健康检查
             .route("/health", get(handlers::health_check))
             .route("/status", get(handlers::get_status))
+            // Localhost-only Agent Gateway. It references existing Claude Desktop
+            // providers and never exposes or copies their upstream credentials.
+            .route("/agent/health", get(handlers::handle_agent_health))
+            .route("/agent/v1/models", get(handlers::handle_agent_models))
+            .route("/agent/v1/messages", post(handlers::handle_agent_messages))
+            .route(
+                "/agent/v1/responses",
+                post(handlers::handle_agent_responses),
+            )
+            .route(
+                "/agent/v1/responses/compact",
+                post(handlers::handle_agent_responses_compact),
+            )
+            .route(
+                "/agent/v1/chat/completions",
+                post(handlers::handle_agent_chat_completions),
+            )
             // Claude API (支持带前缀和不带前缀两种格式)
             .route("/v1/messages", post(handlers::handle_messages))
             .route("/claude/v1/messages", post(handlers::handle_messages))
