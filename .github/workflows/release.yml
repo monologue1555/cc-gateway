@@ -94,6 +94,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $dism = Start-Process -FilePath "$env:windir\System32\dism.exe" `
+            -ArgumentList @(
+              '/Online',
+              '/Add-Capability',
+              '/CapabilityName:VBSCRIPT~~~~',
+              '/NoRestart'
+            ) `
+            -Wait -PassThru -NoNewWindow
+          if ($dism.ExitCode -notin @(0, 3010)) {
+            throw "Failed to install the VBScript capability (DISM exit $($dism.ExitCode))"
+          }
+
           $engines = @(
             @{ Registrar = "$env:windir\System32\regsvr32.exe"; Dll = "$env:windir\System32\vbscript.dll" },
             @{ Registrar = "$env:windir\System32\regsvr32.exe"; Dll = "$env:windir\System32\jscript.dll" },
